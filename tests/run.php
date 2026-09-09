@@ -6,7 +6,9 @@ declare(strict_types=1);
  * TinyPHP 测试架。
  *
  * 单文件用例：tests/cases/<name>.php，头部 `// expect:` 块即预期输出；
- * `// expect-error: <子串>` 表示期望编译失败且错误信息含该子串。
+ * `// expect-error: <子串>` 表示期望编译失败且错误信息含该子串；
+ * `// expect-panic: <子串>` 表示期望运行时 panic（退出码 1，stderr 含该子串，
+ *   不做 mem-stats 断言——panic 直接 exit(1) 不打印统计）。
  * 多文件用例：tests/multi/<name>/ 目录（main.php 为入口，其余 .php 为辅助文件），
  * 预期块写在 main.php 头部。
  *
@@ -27,7 +29,7 @@ foreach (glob($casesDir . '/*.php') ?: [] as $file) {
     if ($filter !== null && !str_contains($name, $filter)) {
         continue;
     }
-    $cases[$name] = ['expected' => extractExpected($file), 'inputs' => [$file], 'expectError' => extractExpectError($file)];
+    $cases[$name] = ['expected' => extractExpected($file), 'inputs' => [$file], 'expectError' => extractExpectError($file), 'expectPanic' => extractExpectPanic($file)];
 }
 
 foreach (glob($multiDir . '/*/main.php') ?: [] as $main) {
@@ -41,7 +43,23 @@ foreach (glob($multiDir . '/*/main.php') ?: [] as $main) {
             $inputs[] = $extra;
         }
     }
-    $cases[$name] = ['expected' => extractExpected($main), 'inputs' => $inputs, 'expectError' => extractExpectError($main)];
+    $cases[$name] = ['expected' => extractExpected($main), 'inputs' => $inputs, 'expectError' => extractExpectError($main), 'expectPanic' => extractExpectPanic($main)];
+}
+
+/** 提取文件头 `// expect-panic: <子串>`（期望运行时 panic：退出码 1）。 */
+function extractExpectPanic(string $file): ?string
+{
+    foreach (file($file) ?: [] as $line) {
+        $trim = trim($line);
+        if (str_starts_with($trim, '// expect-panic:')) {
+            $msg = trim(substr($trim, strlen('// expect-panic:')));
+            return $msg === '' ? null : $msg;
+        }
+        if ($trim === '// expect:') {
+            break;
+        }
+    }
+    return null;
 }
 
 /** 提取文件头 `// expect:` 块。 */
@@ -123,6 +141,22 @@ foreach ($cases as $name => $case) {
     if (!is_file($exe)) {
         echo "FAIL {$name}（编译失败）\n{$out}\n";
         $fail++;
+        continue;
+    }
+
+    // 运行时 panic 用例：退出码必须为 1，输出含指定子串（panic 直接 exit，无 mem 统计）
+    if ($case['expectPanic'] !== null) {
+        $po = [];
+        $code = 0;
+        exec(escapeshellarg($exe) . ' 2>&1', $po, $code);
+        $text = implode("\n", $po);
+        if ($code === 1 && str_contains($text, $case['expectPanic'])) {
+            echo "PASS {$name}\n";
+            $pass++;
+        } else {
+            echo "FAIL {$name}（期望退出码 1 且输出含 \"{$case['expectPanic']}\"，实际退出码 {$code}）\n{$text}\n";
+            $fail++;
+        }
         continue;
     }
 

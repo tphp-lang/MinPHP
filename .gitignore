@@ -1,5 +1,6 @@
 # ai
 .zcode/
+.workbuddy/
 
 # 编译产物
 /tcc
@@ -21,3 +22,7 @@ composer.lock
 
 # 日记
 *.log
+
+# 基准产物（.bench/ 只入库 php 源码）
+.bench/*.c
+.bench/*.exe

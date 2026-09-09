@@ -662,6 +662,7 @@ final class Scanner
             'bool' => TokenKind::KwBool,
             'string' => TokenKind::KwString,
             'array' => TokenKind::KwArray,
+            'map' => TokenKind::KwMap,
             'callable' => TokenKind::KwCallable,
             'void' => TokenKind::KwVoid,
             default => null,

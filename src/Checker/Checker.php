@@ -74,6 +74,8 @@ final class Checker
             $this->validateEntry($entryPath);
         }
         $this->checkBodies($files);
+        // 调用图环检测：收敛深度保护标记（Gen 据此决定 enter/leave 插桩）
+        $this->table->markDepthGuards();
     }
 
     /** @param list<File> $files */
@@ -148,7 +150,28 @@ final class Checker
                 $this->error('array<T> 的元素类型无效', $ref->pos);
                 return Type::NONE;
             }
+            if ($this->table->isMap($elem)) {
+                $this->error('数组元素暂不支持 map（后续版本开放）', $ref->elem->pos);
+                return Type::NONE;
+            }
             return $this->table->arrayOf($elem);
+        }
+        if ($ref->name === 'map') {
+            if ($ref->key === null || $ref->elem === null) {
+                $this->error('map<K,V> 必须指定键与值类型', $ref->pos);
+                return Type::NONE;
+            }
+            $k = $this->resolveTypeRef($ref->key);
+            $v = $this->resolveTypeRef($ref->elem);
+            if (!$this->table->isString($k) && !$this->table->isIntLike($k)) {
+                $this->error('map 的键类型只支持 int 与 string', $ref->key->pos);
+                return Type::NONE;
+            }
+            if ($v === Type::NONE || $v === Type::I_VOID) {
+                $this->error('map<K,V> 的值类型无效', $ref->pos);
+                return Type::NONE;
+            }
+            return $this->table->mapOf($k, $v);
         }
         // C 指针类型：T*（c.char* / CStruct*）
         if ($ref->pointer) {
@@ -193,6 +216,10 @@ final class Checker
         }
         // 空数组字面量可赋给任何 array<T>
         if ($src === Type::I_ARRAY && $this->table->isArray($dst)) {
+            return true;
+        }
+        // 空数组字面量可赋给任何 map<K,V>（借目标类型，Gen 生成 map_new）
+        if ($src === Type::I_ARRAY && $this->table->isMap($dst)) {
             return true;
         }
         if ($this->table->isIntLike($dst) && $this->table->isIntLike($src)) {

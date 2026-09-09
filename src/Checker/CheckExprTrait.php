@@ -442,6 +442,10 @@ trait CheckExprTrait
                 return Type::NONE;
             }
             $e->sig = $sig;
+            // 闭包字面量直接调用：经 thunk 间接执行，静态不可分析 → 强制深度保护
+            if ($this->curFn !== null) {
+                $this->curFn->forceDepthGuard = true;
+            }
             $n = count($e->args);
             if ($n > count($sig['params'])) {
                 $this->error('闭包调用参数过多', $e->pos);
@@ -472,6 +476,10 @@ trait CheckExprTrait
         $this->gateClosureVar($name, $e->pos);
         if ($sym->closureSig === null) {
             return Type::NONE; // gate 已报错
+        }
+        // 闭包调用经 thunk 间接执行，静态不可分析 → 调用方强制深度保护
+        if ($this->curFn !== null) {
+            $this->curFn->forceDepthGuard = true;
         }
         $sig = $sym->closureSig;
         $e->sig = $sig;
@@ -514,7 +522,52 @@ trait CheckExprTrait
     private function checkArrayLit(ArrayLit $e): int
     {
         if ($e->items === []) {
-            return Type::I_ARRAY; // 空数组：借赋值目标的元素类型
+            return Type::I_ARRAY; // 空数组：借赋值目标的元素类型（或 map 类型，见 assignable）
+        }
+        // 全键形式 => map<K,V>（键类型统合后限 int/string）
+        $hasKey = false;
+        $hasNoKey = false;
+        foreach ($e->keys as $k) {
+            if ($k === null) {
+                $hasNoKey = true;
+            } else {
+                $hasKey = true;
+            }
+        }
+        if ($hasKey && $hasNoKey) {
+            $this->error('map 字面量不能混用带键与不带键的元素', $e->pos);
+            foreach ($e->items as $item) {
+                $this->checkExpr($item);
+            }
+            return Type::NONE;
+        }
+        if ($hasKey) {
+            $kt = null;
+            $vt = null;
+            foreach ($e->keys as $i => $kExpr) {
+                $thisK = $this->checkExpr($kExpr);
+                $thisV = $this->checkExpr($e->items[$i]);
+                if (!$this->table->isString($thisK) && !$this->table->isIntLike($thisK)) {
+                    $this->error('map 键类型只支持 int 与 string', $kExpr->pos);
+                    return Type::NONE;
+                }
+                if ($kt === null) {
+                    $kt = $thisK;
+                    $vt = $thisV;
+                    continue;
+                }
+                $kt = $this->commonType($kt, $thisK);
+                $vt = $this->commonType($vt, $thisV);
+                if ($kt === Type::NONE || $vt === Type::NONE) {
+                    $this->error('map 键或值类型不一致', $e->items[$i]->pos);
+                    return Type::NONE;
+                }
+            }
+            if (!$this->table->isString($kt) && !$this->table->isIntLike($kt)) {
+                $this->error('map 键类型只支持 int 与 string', $e->pos);
+                return Type::NONE;
+            }
+            return $this->table->mapOf($kt, $vt);
         }
         $t = $this->checkExpr($e->items[0]);
         for ($i = 1; $i < count($e->items); $i++) {
@@ -534,6 +587,36 @@ trait CheckExprTrait
     }
 
     /** 数组字面量按目标元素类型做上下文检查（new Cat(...) → array<Animal>）。 */
+    /** map 字面量按目标 map<K,V> 逐对校验（键与值）。 */
+    private function checkMapLitAgainst(ArrayLit $e, int $mapType): void
+    {
+        $k = $this->table->mapKeyOf($mapType);
+        $v = $this->table->mapValOf($mapType);
+        foreach ($e->keys as $i => $kExpr) {
+            if ($kExpr === null) {
+                $this->error('map 字面量不能混用带键与不带键的元素', $e->items[$i]->pos);
+                $this->checkExpr($e->items[$i]);
+                continue;
+            }
+            $kt = $this->checkExpr($kExpr);
+            if (!$this->assignableExpr($k, $kExpr)) {
+                $this->error(
+                    'map 键类型不匹配：期望 ' . $this->table->displayName($k)
+                    . '，得到 ' . $this->table->displayName($kt),
+                    $kExpr->pos,
+                );
+            }
+            $vt = $this->checkExpr($e->items[$i]);
+            if (!$this->assignableExpr($v, $e->items[$i])) {
+                $this->error(
+                    'map 值类型不匹配：期望 ' . $this->table->displayName($v)
+                    . '，得到 ' . $this->table->displayName($vt),
+                    $e->items[$i]->pos,
+                );
+            }
+        }
+    }
+
     private function checkArrayLitAgainst(ArrayLit $e, int $elem): void
     {
         foreach ($e->items as $item) {
@@ -566,6 +649,25 @@ trait CheckExprTrait
             }
             $this->requireIntLike($e->index, '数组下标');
             return $this->table->arrayElemOf($base);
+        }
+        if ($this->table->isMap($base)) {
+            if ($e->index === null) {
+                $this->error('map 不支持追加写（$m[] = v），请使用下标写入', $e->pos);
+                return Type::NONE;
+            }
+            $kt = $this->checkExpr($e->index);
+            $k = $this->table->mapKeyOf($base);
+            $ok = $this->table->isString($k)
+                ? $this->table->isString($kt)
+                : $this->table->isIntLike($kt);
+            if (!$ok) {
+                $this->error(
+                    'map 键类型不匹配：期望 ' . $this->table->displayName($k)
+                    . '，得到 ' . $this->table->displayName($kt),
+                    $e->index->pos,
+                );
+            }
+            return $this->table->mapValOf($base);
         }
         $this->error(
             $e->index === null
@@ -762,6 +864,10 @@ trait CheckExprTrait
                 if (!$this->checkArrayLitAgainst($e->value, $this->table->arrayElemOf($targetType))) {
                     $e->value->type = $targetType;
                 }
+            } elseif ($e->value instanceof ArrayLit && $this->table->isMap($targetType)) {
+                // map 字面量按目标 K/V 逐对校验，回填 map 类型（Gen 据此生成 map_new）
+                $this->checkMapLitAgainst($e->value, $targetType);
+                $e->value->type = $targetType;
             } else {
                 $vt = $this->checkExpr($e->value);
                 $this->warnSelfCycle($target, $e->value);
@@ -896,6 +1002,26 @@ trait CheckExprTrait
             if ($this->table->isString($base)) {
                 $this->error('字符串不可变，不能下标赋值', $t->pos);
                 return Type::NONE;
+            }
+            if ($this->table->isMap($base)) {
+                // map 下标写：键不存在即插入，键类型与 K 一致
+                if ($t->index === null) {
+                    $this->error('map 不支持追加写（$m[] = v），请使用下标写入', $t->pos);
+                    return Type::NONE;
+                }
+                $kt = $this->checkExpr($t->index);
+                $k = $this->table->mapKeyOf($base);
+                $ok = $this->table->isString($k)
+                    ? $this->table->isString($kt)
+                    : $this->table->isIntLike($kt);
+                if (!$ok) {
+                    $this->error(
+                        'map 键类型不匹配：期望 ' . $this->table->displayName($k)
+                        . '，得到 ' . $this->table->displayName($kt),
+                        $t->index->pos,
+                    );
+                }
+                return $this->table->mapValOf($base);
             }
             if (!$this->table->isArray($base)) {
                 $this->error($this->table->displayName($base) . ' 类型不能下标赋值', $t->pos);
@@ -1070,6 +1196,9 @@ trait CheckExprTrait
         if ($fn->isBuiltin) {
             return $this->checkBuiltinCall($fn, $e);
         }
+        if ($this->curFn !== null) {
+            $this->table->addCallEdge($this->table->symbolId($this->curFn), $this->table->symbolId($fn));
+        }
         $this->checkArgs($fn, $e->args, $e->pos);
         if ($fn->retClosureSig !== null && $this->table->isCallable($fn->ret)) {
             $e->retClosureSig = $fn->retClosureSig; // 签名挂节点供 $f(...) 推导；静态类型仍是 callable
@@ -1124,6 +1253,28 @@ trait CheckExprTrait
             return Type::I_CVAL;
         }
 
+        if ($fn->name === 'implode') {
+            // implode(string 分隔符, array<string> 部分): string —— 字符串累加的 O(n) 正解
+            if (count($e->args) !== 2) {
+                $this->error('implode() 接受两个参数：(string 分隔符, array<string> 部分)', $e->pos);
+                foreach ($e->args as $arg) {
+                    $this->checkExpr($arg);
+                }
+                return Type::I_STRING;
+            }
+            $sepT = $this->checkExpr($e->args[0]);
+            $arrT = $this->checkExpr($e->args[1]);
+            if (!$this->table->isString($sepT)) {
+                $this->error('implode() 第 1 个参数必须是 string 分隔符', $e->args[0]->pos);
+            }
+            if (!$this->table->isArray($arrT)) {
+                $this->error('implode() 第 2 个参数必须是 array', $e->args[1]->pos);
+            } elseif (!$this->table->isString($this->table->arrayElemOf($arrT))) {
+                $this->error('implode() 要求 array<string>', $e->args[1]->pos);
+            }
+            return Type::I_STRING;
+        }
+
         if (count($e->args) !== 1) {
             $this->error("{$fn->name}() 只接受一个参数", $e->pos);
             foreach ($e->args as $arg) {
@@ -1133,10 +1284,17 @@ trait CheckExprTrait
         }
         $t = $this->checkExpr($e->args[0]);
         if ($fn->name === 'len') {
-            if (!$this->table->isString($t) && !$this->table->isArray($t)) {
-                $this->error('len() 只支持 string 与 array', $e->pos);
+            if (!$this->table->isString($t) && !$this->table->isArray($t) && !$this->table->isMap($t)) {
+                $this->error('len() 只支持 string、array 与 map', $e->pos);
             }
             return Type::I_INT;
+        }
+        if ($fn->name === 'array_keys') {
+            if (!$this->table->isMap($t)) {
+                $this->error('array_keys() 需要 map 参数', $e->pos);
+                return Type::I_ARRAY;
+            }
+            return $this->table->arrayOf($this->table->mapKeyOf($t));
         }
         return Type::I_VOID; // dump
     }
@@ -1210,7 +1368,7 @@ trait CheckExprTrait
     {
         $ot = $this->checkExpr($e->obj);
 
-        // 接口上的方法调用（itab 分发）
+        // 接口上的方法调用（itab 分发）：边到全部实现类的最近实现（动态分发保守集）
         if ($this->table->isInterface($ot)) {
             $iface = $this->table->interfaceByCode($ot);
             $sig = $iface->findMethod($e->name);
@@ -1220,6 +1378,14 @@ trait CheckExprTrait
                     $this->checkExpr($arg);
                 }
                 return Type::NONE;
+            }
+            if ($this->curFn !== null) {
+                foreach ($this->table->implsOf($iface) as $impl) {
+                    $m = $impl->findMethod($e->name);
+                    if ($m !== null) {
+                        $this->table->addCallEdge($this->table->symbolId($this->curFn), $this->table->symbolId($m));
+                    }
+                }
             }
             $this->checkArgs($sig, $e->args, $e->pos);
             return $sig->ret;
@@ -1250,6 +1416,15 @@ trait CheckExprTrait
         if (!$this->canAccess($fn->ownerClass, $fn->vis)) {
             $this->error("无法访问 {$fn->ownerClass->name} 的 {$fn->vis} 方法 {$e->name}()", $e->pos);
         }
+        // 动态分发保守集：接收者类 + 全部子类的最近实现（运行时实际可能执行的符号）
+        if ($this->curFn !== null) {
+            foreach ($this->table->subclassesOf($class) as $cls) {
+                $m = $cls->findMethod($e->name);
+                if ($m !== null) {
+                    $this->table->addCallEdge($this->table->symbolId($this->curFn), $this->table->symbolId($m));
+                }
+            }
+        }
         $this->checkArgs($fn, $e->args, $e->pos);
         return $fn->ret;
     }
@@ -1276,6 +1451,15 @@ trait CheckExprTrait
         }
         if (!$this->canAccess($fn->ownerClass, $fn->vis)) {
             $this->error("无法访问 {$fn->ownerClass->name} 的 {$fn->vis} 方法 {$e->method}()", $e->pos);
+        }
+        // 静态调用的动态绑定保守集（self::/parent:: 在子类上下文可能指向重写）
+        if ($this->curFn !== null) {
+            foreach ($this->table->subclassesOf($class) as $cls) {
+                $m = $cls->findMethod($e->method);
+                if ($m !== null) {
+                    $this->table->addCallEdge($this->table->symbolId($this->curFn), $this->table->symbolId($m));
+                }
+            }
         }
         $this->checkArgs($fn, $e->args, $e->pos);
         return $fn->ret;

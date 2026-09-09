@@ -114,7 +114,11 @@ trait CheckStmtTrait
         if ($s instanceof ForeachStmt) {
             $arrType = $this->checkExpr($s->arr);
             if (!$this->table->isArray($arrType)) {
-                $this->error('foreach 只能遍历数组，得到 ' . $this->table->displayName($arrType), $s->arr->pos);
+                if ($this->table->isMap($arrType)) {
+                    $this->error('map 的遍历请用 array_keys($m)（哈希无序）+ 下标读', $s->arr->pos);
+                } else {
+                    $this->error('foreach 只能遍历数组，得到 ' . $this->table->displayName($arrType), $s->arr->pos);
+                }
                 return;
             }
             $elem = $this->table->arrayElemOf($arrType);
@@ -286,6 +290,10 @@ trait CheckStmtTrait
                     if (!$this->checkArrayLitAgainst($s->init, $this->table->arrayElemOf($type))) {
                         $s->init->type = $type;
                     }
+                } elseif ($s->init instanceof ArrayLit && $this->table->isMap($type)) {
+                    // map 字面量按目标 K/V 逐对校验，回填 map 类型（Gen 据此生成 map_new）
+                    $this->checkMapLitAgainst($s->init, $type);
+                    $s->init->type = $type;
                 } else {
                     $t = $this->checkExpr($s->init);
                     if (!$this->assignableExpr($type, $s->init)) {

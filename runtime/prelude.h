@@ -18,6 +18,7 @@
 #include "tphp_object.h"
 #include "tphp_callable.h"
 #include "tphp_array.h"
+#include "tphp_map.h"
 #include "tphp_builtin.h"
 
 #endif /* TPHP_PRELUDE_H */

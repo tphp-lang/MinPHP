@@ -37,7 +37,8 @@ trait GenRcTrait
     {
         return $this->table->isArray($code)
             || $this->table->isClass($code)
-            || $this->table->isInterface($code);
+            || $this->table->isInterface($code)
+            || $this->table->isMap($code);
     }
 
     /** 是否堆值产生式（new / 函数与方法调用 / 静态方法调用 / 数组字面量）。 */
@@ -70,6 +71,8 @@ trait GenRcTrait
     {
         if ($this->table->isArray($t)) {
             $this->w('tphp_arr_ref(' . $c . ');');
+        } elseif ($this->table->isMap($t)) {
+            $this->w('tphp_map_ref(' . $c . ');');
         } else {
             $this->w('tphp_object_ref(' . $this->rcHeapPath($c, $t) . ');');
         }
@@ -77,9 +80,13 @@ trait GenRcTrait
 
     private function rcUnrefText(string $c, int $t): string
     {
-        return $this->table->isArray($t)
-            ? 'tphp_arr_unref(' . $c . ')'
-            : 'tphp_object_unref(' . $this->rcHeapPath($c, $t) . ')';
+        if ($this->table->isArray($t)) {
+            return 'tphp_arr_unref(' . $c . ')';
+        }
+        if ($this->table->isMap($t)) {
+            return 'tphp_map_unref(' . $c . ')';
+        }
+        return 'tphp_object_unref(' . $this->rcHeapPath($c, $t) . ')';
     }
 
     private function rcUnrefStmt(string $c, int $t): void
@@ -232,9 +239,13 @@ trait GenRcTrait
 
     private function rcRefText(string $c, int $t): string
     {
-        return $this->table->isArray($t)
-            ? 'tphp_arr_ref(' . $c . ')'
-            : 'tphp_object_ref(' . $this->rcHeapPath($c, $t) . ')';
+        if ($this->table->isArray($t)) {
+            return 'tphp_arr_ref(' . $c . ')';
+        }
+        if ($this->table->isMap($t)) {
+            return 'tphp_map_ref(' . $c . ')';
+        }
+        return 'tphp_object_ref(' . $this->rcHeapPath($c, $t) . ')';
     }
 
     /** foreach 元素绑定后的 incref（get 返回借用，值变量需要持有）。 */

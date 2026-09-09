@@ -23,6 +23,9 @@ trait GenDeclTrait
     /** 当前函数返回类型（return 接口包装 / or 传播零值用）。 */
     private int $curRet = 0;
 
+    /** 当前函数是否插深度保护（调用环检测收敛；闭包恒 true——thunk 静态不可分析）。 */
+    private bool $curDepthGuard = true;
+
     /**
      * 收集生成工作项：[FnSymbol, body, 所属类(方法)或 null(全局函数)]。
      *
@@ -518,6 +521,10 @@ trait GenDeclTrait
     /** 枚举成员生成：case 单例 init、from/tryFrom/cases 合成静态方法。 */
     private function genEnumMembers(ClassSymbol $class): void
     {
+        // 合成方法没有自己的 PHP 语句位置，统一回源到枚举声明行——
+        // 否则生成代码里的警告会继承上一个 #line 加偏移，报出虚假行号
+        $this->curFile = $class->pos?->file ?? $this->curFile;
+        $this->sourceLine($class->pos);
         $struct = Names::classStruct($class->name);
         $init = Names::method($class->name, '__enum_init');
         $ready = 'tphp_enum_ready_' . Names::mangle($class->name);
@@ -573,6 +580,7 @@ trait GenDeclTrait
         if ($class->enumBacking === null || $class->enumCases === []) {
             return;
         }
+        $this->sourceLine($class->pos);
         $struct = Names::classStruct($class->name);
         $fn = Names::method($class->name, $throwing ? 'from' : 'tryFrom');
         $init = Names::method($class->name, '__enum_init');
@@ -607,6 +615,7 @@ trait GenDeclTrait
     /** cases()：每次调用返回新建数组（owned，调用方持有；单例引用计数不灭）。 */
     private function genEnumCases(ClassSymbol $class): void
     {
+        $this->sourceLine($class->pos);
         $struct = Names::classStruct($class->name);
         $init = Names::method($class->name, '__enum_init');
         $fn = Names::method($class->name, 'cases');
@@ -635,6 +644,10 @@ trait GenDeclTrait
         $this->w('{');
         $this->indent = 1;
         $this->rcScopeBegin('function');
+        $this->curDepthGuard = $fn->needsDepthGuard;
+        if ($this->curDepthGuard) {
+            $this->w('tphp_depth_enter();');
+        }
         $this->w('size_t __cmem = tphp_cmem_mark();');
         $this->genBoxedParams($fn);
         $this->rcParamIncrefs($fn);
@@ -666,6 +679,10 @@ trait GenDeclTrait
             }
         }
         $this->rcScopeBegin('function');
+        $this->curDepthGuard = $fn->needsDepthGuard;
+        if ($this->curDepthGuard) {
+            $this->w('tphp_depth_enter();');
+        }
         $this->w('size_t __cmem = tphp_cmem_mark();');
         $this->genBoxedParams($fn);
         $this->rcParamIncrefs($fn);
@@ -694,6 +711,9 @@ trait GenDeclTrait
             return;
         }
         // 函数隐式结束：C 内存出口清理必须执行（void 函数同样需要）
+        if ($this->curDepthGuard) {
+            $this->w('tphp_depth_leave();');
+        }
         $this->w('tphp_cmem_free_since(__cmem);');
         if (!$this->table->isVoid($ret)) {
             $this->w('return ' . $this->zeroValue($ret) . '; /* 不可达兜底 */');

@@ -508,16 +508,25 @@ trait ParserExprTrait
     {
         $start = $this->expect(TokenKind::Lbracket, "'['")->pos;
         $items = [];
+        $keys = []; // 与 items 平行；null = 无键（纯列表形式）
         if (!$this->is(TokenKind::Rbracket)) {
             while (true) {
-                $items[] = $this->parseExpr();
+                $first = $this->parseExpr();
+                if ($this->match(TokenKind::FatArrow)) {
+                    // k => v：键值对（map 字面量）
+                    $keys[] = $first;
+                    $items[] = $this->parseExpr();
+                } else {
+                    $keys[] = null;
+                    $items[] = $first;
+                }
                 if (!$this->match(TokenKind::Comma)) {
                     break;
                 }
             }
         }
         $this->expect(TokenKind::Rbracket, "']'");
-        return $this->at(new ArrayLit($items), $start);
+        return $this->at(new ArrayLit($items, $keys), $start);
     }
 
     // ------------------------------------------------------- 字面量与字符串

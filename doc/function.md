@@ -34,6 +34,28 @@ len("hello"); // 5
 len([0,1,2]); // 3
 ```
 
+## implode
+
+拼接 `array<string>` 为单个 string（分隔符插在元素之间）-> `string`。
+两次遍历、一次分配，O(n)——**字符串累加 `$s = $s . x` 是 O(n²)（每次全量
+拷贝），集合型拼接一律用它**。
+
+| 参数名 | 类型 |
+|---- | ---- |
+| $sep | `string` |
+| $parts | `array<string>` |
+
+例子:
+
+```php
+array<string> $parts = [];
+$parts[] = "a";
+$parts[] = "b";
+$parts[] = "c";
+implode("-", $parts); // "a-b-c"
+```
+
+
 ## var_dump
 
 检视值的类型与内容（带换行）-> `void`

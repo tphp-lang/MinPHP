@@ -35,5 +35,7 @@ final class FnSymbol
         public bool $isBuiltin = false,
         public bool $isDefined = true,
         public bool $isDtor = false, // __destruct 用户析构（对象引用归零时先于字段释放调用）
+        public bool $needsDepthGuard = true, // 在调用环上（或未分析）→ 插深度保护；Checker 环检测后收敛
+        public bool $forceDepthGuard = false, // 经闭包/C 回调等不可静态分析的调用 → 强制保护
     ) {}
 }

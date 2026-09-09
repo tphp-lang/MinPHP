@@ -53,6 +53,7 @@ type        = "int" | "float" | "double" | "bool" | "string" | "null"
               ; float = double = 64位（PHP float 语义）；32 位浮点用 c.f32
             | "callable" | "void"
             | "array", "<", type, ">"
+            | "map", "<", type, ",", type, ">"   (* K 限 int/string；哈希无序 *)
             | ident           (* 类名 / 接口名 *)
             | ident, ".", ident (* c.* 别名，如 c.i64 *) ;
 
@@ -278,7 +279,15 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
 - 越界访问运行时报错中止
 - 引用语义（赋值共享底层数组）
 - 字面量 `[1, 2, 3]`；元素类型自动统合，或借用目标声明类型（`array<Animal> $zoo = [new Cat("k")]`）
-- 无 map 语义；不支持解构、spread、键混用
+- 无键值语义（关联数组见下节 map）；不支持解构、spread、键混用
+
+### map（关联数组）
+
+- `map<K,V>`：K 限 int/string，V 限标量与 string（哈希表，链地址法）
+- 字面量：`["a" => 1, "b" => 2]`（全键形式，键类型统合；K/V 亦可借目标 map 类型）
+- 下标读写 `$m["k"]`；写即插入、重复写覆盖；**读取缺失键 panic**（不可捕获）
+- `len($m)` / `array_keys($m)`（键收集为 array\<K\>，遍历入口：哈希无序，不保证键序）
+- 引用语义（赋值共享）；map 不作类字段/数组元素/嵌套（Checker 明确拒绝）
 
 ### 内置函数（全部）
 
@@ -286,6 +295,8 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
 | ---- | ---- |
 | `len($x)` | string 长度 / array 元素数 → int |
 | `var_dump($x)` | 打印类型与值（调试用） |
+| `implode($sep, $parts)` | 拼接 array\<string\>（O(n)，字符串累加的正解工具） |
+| `array_keys($m)` | map 的键收集为 array\<K\>（遍历入口） |
 | `c_str($s)` | string → char*（借用，phpc） |
 | `php_str($p)` / `php_str_ref($p)` | char* → string（深拷贝 / 零拷贝借用） |
 | `cbuf($n)` | 分配 n 字节 C 缓冲（登记所有权，函数出口自动 free） |

@@ -118,20 +118,41 @@ static String tphp_str_copy(const char *bytes, int32_t length)
 
 /* ---------------------------------------------------------------- 操作 */
 
+/*
+ * 取 String 的 C 字符串指针。两条路径的安全边界完全不同：
+ *  - tphp_str_cref(&s)：指向调用方对象，调用期间始终有效——任何 String 都可用；
+ *  - tphp_str_c(s)（按值）：仅限 .rodata 字面量（is_lit，u.data 指向静态存储，
+ *    副本销毁无影响）。SSO 值经按值传参返回 u.local 会指向已销毁的参数副本。
+ * 生成代码里 c_str(变量) 走 cref，c_str(字面量) 走按值版。
+ */
+static const char *tphp_str_cref(const String *s)
+{
+    return s->is_local ? s->u.local : s->u.data;
+}
+
+/* 仅用于 .rodata 字面量（见 tphp_str_cref 注释）。
+ * clang 静态分析不知道 is_local 恒为 false 这一调用约定，保守告警，压制。 */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-stack-address"
+#endif
 static const char *tphp_str_c(const String s)
 {
     return s.is_local ? s.u.local : s.u.data;
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 static String tphp_str_concat(String a, String b)
 {
     String s = tphp_str_alloc(a.length + b.length);
     char *dst = s.is_local ? s.u.local : s.u.data;
     if (a.length > 0) {
-        memcpy(dst, tphp_str_c(a), (size_t)a.length);
+        memcpy(dst, tphp_str_cref(&a), (size_t)a.length);
     }
     if (b.length > 0) {
-        memcpy(dst + a.length, tphp_str_c(b), (size_t)b.length);
+        memcpy(dst + a.length, tphp_str_cref(&b), (size_t)b.length);
     }
     return s;
 }
@@ -175,7 +196,7 @@ static String tphp_str_char(String s, int32_t i)
         tphp_panic("string index out of bounds");
     }
     String r = tphp_str_empty();
-    r.u.local[0] = tphp_str_c(s)[i];
+    r.u.local[0] = tphp_str_cref(&s)[i];
     r.length = 1;
     return r;
 }

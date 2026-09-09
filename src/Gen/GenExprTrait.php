@@ -109,6 +109,12 @@ trait GenExprTrait
         }
         if ($e instanceof CallExpr) {
             $call = $this->genCall($e);
+        if ($e->name === 'implode') {
+            // O(n) 拼接：先算总长一次分配（字符串累加 `$s = $s . x` 的 O(n²) 正解工具）
+            $sep = $this->genExpr($e->args[0]);
+            $arr = $this->genExpr($e->args[1]);
+            return 'tphp_str_implode(' . $sep . ', ' . $arr . ')';
+        }
         // 内置函数（len/var_dump/phpc 桥接/c_fn）不会失败；用户函数统一包装错误传播
         if ($e->name === 'len' || $e->name === 'var_dump' || $e->name === 'c_str'
             || $e->name === 'php_str' || $e->name === 'php_str_ref'
@@ -179,6 +185,9 @@ trait GenExprTrait
 
     private function genArrayLit(ArrayLit $e): string
     {
+        if ($this->table->isMap($e->type)) {
+            return $this->genMapLit($e);
+        }
         $elem = $this->table->arrayElemOf($e->type);
         $flags = $this->table->arrayElemFlags($e->type);
         $t = $this->tmp('arr');
@@ -241,6 +250,9 @@ trait GenExprTrait
         $idx = $e->index !== null ? $this->genExpr($e->index) : '0';
         $baseType = $e->base->type;
 
+        if ($this->table->isMap($baseType)) {
+            return $this->mapGetCall($e, $base, $idx);
+        }
         if ($baseType === Type::I_STRING) {
             return 'tphp_str_char(' . $base . ', ' . $idx . ')';
         }
@@ -274,6 +286,74 @@ trait GenExprTrait
 
     // ------------------------------------------------------------------ 运算
 
+    /** map 下标读：键入适配缓冲 → get_raw → 按 V 解释值槽。缺失键运行时 panic。 */
+    private function mapGetCall(IndexExpr $e, string $base, string $idx): string
+    {
+        $kCode = $this->table->mapKeyOf($e->base->type);
+        $vCode = $this->table->mapValOf($e->base->type);
+        $kis = $this->table->mapKeyIsString($e->base->type) ? 1 : 0;
+        $kC = $this->elemCType($kCode);
+        $vC = $this->elemCType($vCode);
+        $k = '__mk';
+        $v = '__mv';
+        $lines = [
+            '({',
+            $this->indentText() . '    ' . $kC . ' ' . $k . ' = ' . $idx . ';',
+            $this->indentText() . '    ' . $vC . ' ' . $v . ';',
+            $this->indentText() . '    tphp_map_get_raw(' . $base . ', &' . $k . ', ' . $kis . ', &' . $v . ');',
+            $this->indentText() . '    ' . $v . ';',
+            $this->indentText() . '})',
+        ];
+        return implode("\n", $lines);
+    }
+
+    /** map 下标写：键不存在插入、存在覆盖（值槽 raw 拷贝）。 */
+    private function mapSetCall(IndexExpr $target, string $value): string
+    {
+        $base = $this->genExpr($target->base);
+        $idx = $this->genExpr($target->index);
+        $kCode = $this->table->mapKeyOf($target->base->type);
+        $kis = $this->table->mapKeyIsString($target->base->type) ? 1 : 0;
+        $kC = $this->elemCType($kCode);
+        $vC = $this->elemCType($this->table->mapValOf($target->base->type));
+        $k = '__mk';
+        $v = '__mv';
+        $lines = [
+            '({',
+            $this->indentText() . '    ' . $kC . ' ' . $k . ' = ' . $idx . ';',
+            $this->indentText() . '    ' . $vC . ' ' . $v . ' = ' . $value . ';',
+            $this->indentText() . '    tphp_map_set_raw(' . $base . ', &' . $k . ', ' . $kis . ', &' . $v . ');',
+            $this->indentText() . '})',
+        ];
+        return implode("\n", $lines);
+    }
+
+    /** map 字面量：map_new + 逐对 set_raw（键/值各入适配缓冲）。 */
+    private function genMapLit(ArrayLit $e): string
+    {
+        $kis = $this->table->mapKeyIsString($e->type) ? 1 : 0;
+        $vsize = $this->table->mapValSize($e->type);
+        $kCode = $this->table->mapKeyOf($e->type);
+        $vCode = $this->table->mapValOf($e->type);
+        $kC = $this->elemCType($kCode);
+        $vC = $this->elemCType($vCode);
+        $t = $this->tmp('map');
+        $lines = [
+            '({',
+            $this->indentText() . '    Map* ' . $t . ' = tphp_map_new(' . $vsize . ', ' . $kis . ');',
+        ];
+        foreach ($e->keys as $i => $kExpr) {
+            $k = '__mk' . $i;
+            $v = '__mv' . $i;
+            $lines[] = $this->indentText() . '    ' . $kC . ' ' . $k . ' = ' . $this->genExpr($kExpr) . ';';
+            $lines[] = $this->indentText() . '    ' . $vC . ' ' . $v . ' = ' . $this->genExpr($e->items[$i]) . ';';
+            $lines[] = $this->indentText() . '    tphp_map_set_raw(' . $t . ', &' . $k . ', ' . $kis . ', &' . $v . ');';
+        }
+        $lines[] = $this->indentText() . '    ' . $t . ';';
+        $lines[] = $this->indentText() . '})';
+        return implode("\n", $lines);
+    }
+
     private function genBinary(BinaryExpr $e): string
     {
         $op = $e->op;
@@ -288,6 +368,18 @@ trait GenExprTrait
                     return 'tphp_int_pow(' . $l . ', ' . $r . ')';
                 }
                 return 'pow((double)(' . $l . '), (double)(' . $r . '))';
+
+            case TokenKind::Slash:
+            case TokenKind::Percent:
+                // 整数除法/取模：右值为 0 在 C 下是硬件异常/UB，插 panic 检查
+                //（浮点走 IEEE 除零语义，不查）。右值为非零字面量时零开销直出。
+                if ($lt === Type::I_INT && $rt === Type::I_INT
+                    && !($e->right instanceof IntLit && $e->right->value !== 0)) {
+                    $msg = $op === TokenKind::Slash ? 'division by zero' : 'modulo by zero';
+                    return '({ int32_t __d = (' . $r . '); if (__d == 0) { tphp_panic("' . $msg
+                        . '"); } (' . $l . ') ' . $this->opText($op) . ' __d; })';
+                }
+                return '((' . $l . ') ' . $this->opText($op) . ' (' . $r . '))';
 
             case TokenKind::Dot:
                 return 'tphp_str_concat(' . $this->toStrExpr($l, $lt) . ', ' . $this->toStrExpr($r, $rt) . ')';
@@ -356,7 +448,8 @@ trait GenExprTrait
     private function propagateReturn(): string
     {
         $ret = $this->table->isVoid($this->curRet) ? 'return;' : 'return ' . $this->zeroValue($this->curRet) . ';';
-        return 'tphp_cmem_free_since(__cmem); ' . $ret;
+        $leave = $this->curDepthGuard ? 'tphp_depth_leave(); ' : '';
+        return $leave . 'tphp_cmem_free_since(__cmem); ' . $ret;
     }
 
     /**
@@ -634,6 +727,17 @@ trait GenExprTrait
                     return $lv . ' = tphp_int_pow(' . $lv . ', ' . $value . ')';
                 }
                 return $lv . ' = pow((double)(' . $lv . '), (double)(' . $value . '))';
+            case TokenKind::SlashEq:
+            case TokenKind::PercentEq:
+                // 复合除/取模与 genBinary 的除零保护对称
+                if ($tt === Type::I_INT && $vt === Type::I_INT
+                    && !($e->value instanceof IntLit && $e->value->value !== 0)) {
+                    $msg = $e->op === TokenKind::SlashEq ? 'division by zero' : 'modulo by zero';
+                    $opch = $e->op === TokenKind::SlashEq ? '/' : '%';
+                    return '({ int32_t __d = (' . $value . '); if (__d == 0) { tphp_panic("' . $msg
+                        . '"); } ' . $lv . ' ' . $opch . '= __d; })';
+                }
+                return $lv . ' ' . $this->opText($e->op) . ' ' . $value;
             default:
                 return $lv . ' ' . $this->opText($e->op) . ' ' . $value;
         }
@@ -642,6 +746,9 @@ trait GenExprTrait
     /** 下标写入调用文本（带越界检查）。 */
     private function setElemCall(IndexExpr $target, string $value): string
     {
+        if ($this->table->isMap($target->base->type)) {
+            return $this->mapSetCall($target, $value);
+        }
         $base = $this->genExpr($target->base);
         $idx = $this->genExpr($target->index);
         $elem = $this->table->arrayElemOf($target->base->type);
@@ -675,6 +782,35 @@ trait GenExprTrait
     private function genCompoundIndexAssign(AssignExpr $e, string $value): string
     {
         $target = $e->target;
+        // map 下标复合赋值：读旧值 → 运算 → 写回（键缓冲复用，一次哈希查找不是必须但保正确）
+        if ($this->table->isMap($target->base->type)) {
+            $base = $this->genExpr($target->base);
+            $idx = $this->genExpr($target->index);
+            $kCode = $this->table->mapKeyOf($target->base->type);
+            $kis = $this->table->mapKeyIsString($target->base->type) ? 1 : 0;
+            $kC = $this->elemCType($kCode);
+            $vC = $this->elemCType($this->table->mapValOf($target->base->type));
+            $opText = $this->opText($e->op);
+            // 通用形态：__nv = __cur <op> value（.= 与 **= 特判）
+            $calc = match ($e->op) {
+                TokenKind::DotEq => 'tphp_str_concat(__cur, ' . $value . ')',
+                TokenKind::PowEq => ($this->table->mapValOf($target->base->type) === Type::I_INT)
+                    ? 'tphp_int_pow(__cur, ' . $value . ')'
+                    : 'pow((double)(__cur), (double)(' . $value . '))',
+                default => '(__cur ' . $opText . ' (' . $value . '))',
+            };
+            $lines = [
+                '({',
+                $this->indentText() . '    ' . $kC . ' __mk = ' . $idx . ';',
+                $this->indentText() . '    ' . $vC . ' __cur;',
+                $this->indentText() . '    tphp_map_get_raw(' . $base . ', &__mk, ' . $kis . ', &__cur);',
+                $this->indentText() . '    ' . $vC . ' __nv = ' . $calc . ';',
+                $this->indentText() . '    tphp_map_set_raw(' . $base . ', &__mk, ' . $kis . ', &__nv);',
+                $this->indentText() . '    __nv;',
+                $this->indentText() . '})',
+            ];
+            return implode("\n", $lines);
+        }
         $base = $this->genExpr($target->base);
         $idx = $this->genExpr($target->index);
         $elem = $this->table->arrayElemOf($target->base->type);
@@ -690,6 +826,13 @@ trait GenExprTrait
             $get = 'tphp_arr_get_int(' . $base . ', ' . $idx . ')';
             if ($op === TokenKind::PowEq) {
                 $next = 'tphp_int_pow(' . $get . ', ' . $value . ')';
+            } elseif (($op === TokenKind::SlashEq || $op === TokenKind::PercentEq)
+                && !($e->value instanceof IntLit && $e->value->value !== 0)) {
+                // 复合除/取模零检查（下标元素）
+                $msg = $op === TokenKind::SlashEq ? 'division by zero' : 'modulo by zero';
+                $opch = $op === TokenKind::SlashEq ? '/' : '%';
+                $next = '({ int32_t __d = (' . $value . '); if (__d == 0) { tphp_panic("' . $msg
+                    . '"); } (' . $get . ') ' . $opch . ' __d; })';
             } else {
                 $next = '(' . $get . ' ' . $this->opText($op) . ' (' . $value . '))';
             }
@@ -728,16 +871,29 @@ trait GenExprTrait
             $arg = $this->isFreshProducer($e->args[0]) && $this->isHeapType($e->args[0]->type)
                 ? $this->rcHoist($e->args[0])
                 : $this->genExpr($e->args[0]);
+            if ($this->table->isMap($e->args[0]->type)) {
+                return 'tphp_map_len(' . $arg . ')';
+            }
             return $e->args[0]->type === Type::I_STRING
                 ? '((' . $arg . ').length)'
                 : 'tphp_len_arr(' . $arg . ')';
+        }
+        if ($e->name === 'array_keys') {
+            return 'tphp_map_keys(' . $this->genExpr($e->args[0]) . ')';
         }
         if ($e->name === 'var_dump') {
             return $this->genDumpCall($e->args[0]);
         }
         // phpc 桥接：string → char*（借用）
         if ($e->name === 'c_str') {
-            return 'tphp_str_c(' . $this->genExpr($e->args[0]) . ')';
+            $arg = $e->args[0];
+            // 变量（含引用捕获的盒子）：走 cref 取调用方对象地址——SSO 短串的数据
+            // 内联在宿主结构体里，按值传参会指向已销毁的参数副本（悬垂）。
+            if ($arg instanceof VarExpr) {
+                return 'tphp_str_cref(&' . $this->varReadText($arg) . ')';
+            }
+            // 字面量：tphp_str_lit 的 u.data 指向 .rodata，按值版安全
+            return 'tphp_str_c(' . $this->genExpr($arg) . ')';
         }
         // C 内存所有权：c_own 登记（函数出口自动 free）；cbuf 分配 + 登记
         if ($e->name === 'c_own') {

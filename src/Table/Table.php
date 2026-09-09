@@ -82,6 +82,8 @@ final class Table
         // 内置极小函数集
         $this->fns['len'] = new FnSymbol('len', isBuiltin: true);
         $this->fns['var_dump'] = new FnSymbol('var_dump', isBuiltin: true);
+        $this->fns['implode'] = new FnSymbol('implode', isBuiltin: true); // 字符串累加的 O(n) 正解工具
+        $this->fns['array_keys'] = new FnSymbol('array_keys', isBuiltin: true); // map 的键收集（遍历入口）
         // phpc 桥接：string ↔ char* + C 内存所有权
         $this->fns['c_str'] = new FnSymbol('c_str', isBuiltin: true);
         $this->fns['php_str'] = new FnSymbol('php_str', isBuiltin: true);
@@ -136,6 +138,72 @@ final class Table
     public function arrayElemOf(int $code): int
     {
         return $this->arrayElems[$code] ?? Type::NONE;
+    }
+
+    /** @var array<int, array{0: int, 1: int}> map 类型码 → [K, V] */
+    private array $mapKV = [];
+
+    /** 取出（或注册）map<K,V> 类型码；K 限 int/string，V 为任意元素类型。 */
+    public function mapOf(int $kCode, int $vCode): int
+    {
+        $key = 'map<' . $kCode . ',' . $vCode . '>';
+        if (isset($this->byName[$key])) {
+            return $this->byName[$key];
+        }
+        $code = $this->nextCtype++;
+        $this->kinds[$code] = TypeKind::MapType;
+        $this->cnames[$code] = 'Map';
+        $this->byName[$key] = $code;
+        $this->mapKV[$code] = [$kCode, $vCode];
+        return $code;
+    }
+
+    public function isMap(int $code): bool
+    {
+        return $this->kindOf($code) === TypeKind::MapType;
+    }
+
+    /** map 的键类型（K）。 */
+    public function mapKeyOf(int $code): int
+    {
+        return $this->mapKV[$code][0] ?? Type::NONE;
+    }
+
+    /** map 的值类型（V）。 */
+    public function mapValOf(int $code): int
+    {
+        return $this->mapKV[$code][1] ?? Type::NONE;
+    }
+
+    /** map 键是否为 string（false = int）。 */
+    public function mapKeyIsString(int $code): bool
+    {
+        return $this->isString($this->mapKeyOf($code));
+    }
+
+    /** map 值槽的字节尺寸（Gen 传给 tphp_map_set_raw；必须与 C 侧 sizeof 一致）。 */
+    public function mapValSize(int $code): int
+    {
+        $v = $this->mapValOf($code);
+        if ($this->isString($v)) {
+            return 32; // String：u(24，SSO 内联缓冲) + length(4) + is_local/is_lit(2) + 对齐(2)
+        }
+        if ($this->isInterface($v)) {
+            return 16; // TphpIface 胖指针 {obj, itab}
+        }
+        if ($this->isArray($v) || $this->isMap($v) || $this->isClass($v)) {
+            return 8; // 指针
+        }
+        if ($v === Type::I_DOUBLE) {
+            return 8;
+        }
+        if ($v === Type::I_FLOAT) {
+            return 4;
+        }
+        if ($v === Type::I_BOOL) {
+            return 1;
+        }
+        return 4; // int（默认）
     }
 
     // ------------------------------------------------------------- 分类判定
@@ -350,5 +418,108 @@ final class Table
             return $this->className($code);
         }
         return Type::BUILTIN_NAMES[$code] ?? '<unknown>';
+    }
+
+    /* ------------------------------------------------- 调用图（深度保护收窄） */
+
+    /** @var array<string, array<string, true>> 调用边：caller 符号 id → callee 符号 id 集合 */
+    public array $callEdges = [];
+
+    /** 符号的调用图节点 id（对象 id 保证同名方法/多个闭包互不混叠）。 */
+    public function symbolId(FnSymbol $fn): string
+    {
+        return ($fn->ownerClass !== null ? $fn->ownerClass->name . '::' : '')
+            . $fn->name . '#' . spl_object_id($fn);
+    }
+
+    public function addCallEdge(string $caller, string $callee): void
+    {
+        $this->callEdges[$caller][$callee] = true;
+    }
+
+    /** 类及其全部子类（沿 parent 链向上匹配）。 @return list<ClassSymbol> */
+    public function subclassesOf(ClassSymbol $c): array
+    {
+        $out = [];
+        foreach ($this->classes as $k) {
+            for ($p = $k; $p !== null; $p = $p->parent) {
+                if ($p->name === $c->name) {
+                    $out[] = $k;
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** 实现了某接口的全部类（含经父类继承实现）。 @return list<ClassSymbol> */
+    public function implsOf(InterfaceSymbol $iface): array
+    {
+        $out = [];
+        foreach ($this->classes as $c) {
+            for ($p = $c; $p !== null; $p = $p->parent) {
+                if (isset($this->classImplements($p)[$iface->name])) {
+                    $out[] = $c;
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** @return array<string, InterfaceSymbol> 类直接+继承实现的接口（供 implsOf 复用）。 */
+    private function classImplements(ClassSymbol $c): array
+    {
+        $out = [];
+        foreach ($c->implements as $iface) {
+            foreach ($iface->extendsClosure() as $name => $ancestor) {
+                $out[$name] = $ancestor;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 环检测：只给"自可达"（调用能回到自己）的函数保留深度保护，
+     * 其余函数（叶子/纯调用链）的 enter/leave 插桩在 Gen 侧省略。
+     * 保守方向：方法动态分发按类+全部子类的最近实现收集边；经闭包/C 回调等
+     * 不可静态分析的调用由 Checker 置 forceDepthGuard（见 CheckExprTrait）。
+     */
+    public function markDepthGuards(): void
+    {
+        foreach ($this->fns as $fn) {
+            if ($fn->isBuiltin) {
+                continue;
+            }
+            $fn->needsDepthGuard = $fn->forceDepthGuard || $this->selfReachable($this->symbolId($fn));
+        }
+        foreach ($this->classes as $class) {
+            foreach ($class->methods as $method) {
+                $id = $this->symbolId($method);
+                $method->needsDepthGuard = $method->forceDepthGuard || $this->selfReachable($id);
+            }
+        }
+    }
+
+    private function selfReachable(string $start): bool
+    {
+        $seen = [];
+        $stack = array_keys($this->callEdges[$start] ?? []);
+        while ($stack !== []) {
+            $cur = array_pop($stack);
+            if ($cur === $start) {
+                return true;
+            }
+            if (isset($seen[$cur])) {
+                continue;
+            }
+            $seen[$cur] = true;
+            foreach (array_keys($this->callEdges[$cur] ?? []) as $next) {
+                if (!isset($seen[$next])) {
+                    $stack[] = $next;
+                }
+            }
+        }
+        return false;
     }
 }

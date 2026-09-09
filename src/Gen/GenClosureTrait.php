@@ -102,6 +102,7 @@ trait GenClosureTrait
         $savedCtx = $this->capCtx;
         $savedScopes = $this->rcScopes;
         $savedReleases = $this->rcStmtReleases;
+        $savedDepthGuard = $this->curDepthGuard;
         $savedIndent = $this->indent;
         $savedRet = $this->curRet;
         $savedClass = $this->curClassSym;
@@ -122,8 +123,13 @@ trait GenClosureTrait
         $this->indent = 1;
         $this->curRet = $e->sig['ret'];
         $this->curClassSym = null;
+        $this->sourceLine($e->pos);
+        $this->curDepthGuard = true; // thunk 静态不可分析，恒插深度保护
         $this->rcScopes = []; // thunk 的 RC 栈独立（否则 rcCleanupReturn 会清理外层函数的变量）
         $this->rcScopeBegin('closure');
+        if ($this->curDepthGuard) {
+            $this->w('tphp_depth_enter();');
+        }
         $this->w('size_t __cmem = tphp_cmem_mark();');
         foreach ($e->sig['params'] as $i => $pt) {
             $cName = Names::localVar($e->params[$i]->name);
@@ -150,6 +156,7 @@ trait GenClosureTrait
         $this->curClassSym = $savedClass;
         $this->cur = $savedCur;
         $this->curFile = $savedFile;
+        $this->curDepthGuard = $savedDepthGuard;
 
         // 5) 创建表达式
         $init = '';

@@ -5,6 +5,29 @@
 #ifndef TPHP_BUILTIN_H
 #define TPHP_BUILTIN_H
 
+/* ---------------------------------------------- 递归深度（栈溢出保护） */
+
+#ifndef TPHP_MAX_DEPTH
+#define TPHP_MAX_DEPTH 2000 /* Windows 默认 1MB 栈下的保守深度；#flag -DTPHP_MAX_DEPTH=n 可调 */
+#endif
+
+static int32_t tphp_depth = 0;
+
+/* 宏而非 static 函数：TCC 不做跨函数内联，函数调用形态会让
+ * 调用密集程序（每次调用 2 次 call）付出 ~80% 开销（实测 fib +81%）；
+ * 宏展开后仅 ++/cmp/-- 三条指令。 */
+#define tphp_depth_enter() \
+    do { \
+        if (++tphp_depth > TPHP_MAX_DEPTH) { \
+            tphp_panic("stack overflow (recursion too deep)"); \
+        } \
+    } while (0)
+
+#define tphp_depth_leave() \
+    do { \
+        tphp_depth--; \
+    } while (0)
+
 /* ---------------------------------------------------------------- echo */
 
 static void tphp_echo_int(int32_t v) { printf("%d", v); }
@@ -25,8 +48,42 @@ static Array *tphp_args_array(int argc, char **argv)
 static void tphp_echo_str(String s)
 {
     if (s.length > 0) {
-        fwrite(tphp_str_c(s), 1, (size_t)s.length, stdout);
+        fwrite(tphp_str_cref(&s), 1, (size_t)s.length, stdout);
     }
+}
+
+/* ---------------------------------------------------------------- implode */
+
+/* implode(sep, parts)：两次遍历（求总长 → 一次分配一次拷贝），O(n)。
+ * 字符串累加 `$s = $s . x` 是 O(n²)（每次全量拷贝），集合型拼接用它。 */
+static String tphp_str_implode(String sep, Array *a)
+{
+    if (!a) {
+        tphp_panic("implode() applied to a null array");
+    }
+    int32_t total = 0;
+    for (int32_t i = 0; i < a->length; i++) {
+        String v = ((String *)a->data)[i];
+        total += v.length;
+        if (i > 0) {
+            total += sep.length;
+        }
+    }
+    String r = tphp_str_alloc(total);
+    char *dst = r.is_local ? r.u.local : r.u.data; /* 自有可写缓冲，不经 cref（返回 const） */
+    int32_t off = 0;
+    for (int32_t i = 0; i < a->length; i++) {
+        String v = ((String *)a->data)[i];
+        if (i > 0 && sep.length > 0) {
+            memcpy(dst + off, tphp_str_cref(&sep), (size_t)sep.length);
+            off += sep.length;
+        }
+        if (v.length > 0) {
+            memcpy(dst + off, tphp_str_cref(&v), (size_t)v.length);
+            off += v.length;
+        }
+    }
+    return r;
 }
 
 /* ---------------------------------------------------------------- dump */
@@ -38,7 +95,7 @@ static void tphp_dump_bool(bool v) { printf("bool(%s)\n", v ? "true" : "false");
 
 static void tphp_dump_str(String s)
 {
-    printf("string(%d) \"%.*s\"\n", s.length, (int)s.length, tphp_str_c(s));
+    printf("string(%d) \"%.*s\"\n", s.length, (int)s.length, tphp_str_cref(&s));
 }
 
 /* ---------------------------------------------------------------- 标量 → 字符串 */
@@ -87,17 +144,17 @@ static String tphp_str_of_ulong(unsigned long long v)
 
 static int32_t tphp_str_to_int(String s)
 {
-    return (int32_t)strtol(tphp_str_c(s), NULL, 10);
+    return (int32_t)strtol(tphp_str_cref(&s), NULL, 10);
 }
 
 static float tphp_str_to_float(String s)
 {
-    return strtof(tphp_str_c(s), NULL);
+    return strtof(tphp_str_cref(&s), NULL);
 }
 
 static double tphp_str_to_double(String s)
 {
-    return strtod(tphp_str_c(s), NULL);
+    return strtod(tphp_str_cref(&s), NULL);
 }
 
 /* ---------------------------------------------------------------- 幂 */
@@ -227,7 +284,7 @@ static String tphp_err_take(void)
 static void tphp_err_uncaught(String msg)
 {
     fflush(stdout); /* 保证 stdout 先于 stderr 落盘，输出顺序确定 */
-    fprintf(stderr, "Uncaught error: %.*s\n", (int)msg.length, tphp_str_c(msg));
+    fprintf(stderr, "Uncaught error: %.*s\n", (int)msg.length, tphp_str_cref(&msg));
     exit(1);
 }
 

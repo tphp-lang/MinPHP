@@ -237,10 +237,19 @@ trait GenStmtTrait
     }
 
     /** return：所有权转移 / 借用 incref / 全作用域清理。 */
+    /** 当前函数有深度保护时输出 leave（调用图环检测收敛后的条件插桩）。 */
+    private function condDepthLeave(): void
+    {
+        if ($this->curDepthGuard) {
+            $this->w('tphp_depth_leave();');
+        }
+    }
+
     private function genReturn(ReturnStmt $s): void
     {
         if ($s->expr === null) {
             $this->rcCleanupReturn();
+            $this->condDepthLeave();
             $this->w('tphp_cmem_free_since(__cmem);');
             $this->w('return;');
             $this->lastReturned = true;
@@ -269,7 +278,11 @@ trait GenStmtTrait
         }
         $this->rcCleanupReturn();
         $this->w('tphp_cmem_free_since(__cmem);');
-        $this->w('return ' . $text . ';');
+        // 先把返回表达式求值入临时（递归调用发生在此，本帧深度必须仍在计数），
+        // 之后再 leave——leave 若先于表达式求值，深度会先减后加，永远到不了上限。
+        $this->w($this->cType($this->curRet) . ' __rv = ' . $text . ';');
+        $this->condDepthLeave();
+        $this->w('return __rv;');
         $this->lastReturned = true;
     }
 

@@ -627,6 +627,16 @@ trait ParserDeclTrait
             return new TypeRef('array', $elem)->withPos($t->pos);
         }
 
+        if ($kind === TokenKind::KwMap) {
+            $this->next();
+            $this->expect(TokenKind::Lt, "'<'（map<K,V> 必须指定键与值类型）");
+            $key = $this->parseTypeRef();
+            $this->expect(TokenKind::Comma, "','（map<K,V> 的键与值类型以逗号分隔）");
+            $val = $this->parseTypeRef();
+            $this->expectTypeGt();
+            return new TypeRef('map', $val, false, $key)->withPos($t->pos);
+        }
+
         if ($kind === TokenKind::Ident) {
             $this->next();
             $name = $t->lit;

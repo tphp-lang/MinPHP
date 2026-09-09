@@ -388,6 +388,10 @@ trait CheckDeclTrait
             return;
         }
         $type = $this->resolveTypeRef($prop->typeRef);
+        if ($this->table->isMap($type)) {
+            $this->error('map 暂不支持作为类字段（仅局部变量与参数）', $prop->typeRef->pos);
+            return;
+        }
         if ($prop->hasDefault) {
             if ($prop->default === null || !$this->isLiteralScalar($prop->default)) {
                 $this->error('属性默认值必须是标量或 null 字面量', $prop->typeRef->pos);

@@ -85,6 +85,7 @@ enum TokenKind
     case KwBool;
     case KwString;
     case KwArray;
+    case KwMap;
     case KwCallable;
     case KwVoid;
 
@@ -150,7 +151,7 @@ enum TokenKind
     {
         return match ($this) {
             self::KwInt, self::KwFloat, self::KwDouble, self::KwBool, self::KwString,
-            self::KwArray, self::KwCallable, self::KwVoid, self::KwNull, self::Ident => true,
+            self::KwArray, self::KwMap, self::KwCallable, self::KwVoid, self::KwNull, self::Ident => true,
             default => false,
         };
     }

@@ -9,6 +9,8 @@ use Tphp\Ast\decl\ConstDecl;
 use Tphp\Ast\decl\EnumDecl;
 use Tphp\Ast\decl\FunctionDecl;
 use Tphp\Ast\decl\InterfaceDecl;
+use Tphp\Ast\decl\TraitDecl;
+use Tphp\Ast\decl\UseTraitDecl;
 use Tphp\Ast\Expr;
 use Tphp\Ast\File;
 use Tphp\Ast\expr\ArrayLit;
@@ -62,10 +64,145 @@ use Tphp\Gen\Names;
 /** 第一遍：收集符号（类 → 成员 → 函数），第二遍：检查函数体。 */
 trait CheckDeclTrait
 {
+    /** 方法注册计数器（决定方法体检查与函数生成顺序；trait 展开后仍稳定）。 */
+    private int $methodOrdinal = 0;
+
     /** 文件命名空间前缀：'' 表示全局。 */
     private function fqPrefix(File $file): string
     {
         return $file->namespace !== '' ? $file->namespace . '\\' : '';
+    }
+
+    /**
+     * trait 自身成员注册 + 嵌套 use 展开。traitsExpanded 标记防循环 use 无限递归
+     * （PHP 对循环 use 报错；此处静默截断，避免挂死）。
+     */
+    private function registerTraitMembers(ClassSymbol $sym, object $decl): void
+    {
+        if ($sym->traitsExpanded) {
+            return;
+        }
+        $sym->traitsExpanded = true;
+        foreach ($decl->classConsts as $cc) {
+            $this->registerClassConst($sym, $cc);
+        }
+        foreach ($decl->props as $prop) {
+            $this->registerProp($sym, $prop);
+        }
+        foreach ($decl->methods as $method) {
+            $this->registerMethod($sym, $method);
+        }
+        $this->applyUseTraits($sym, $decl->useTraits);
+    }
+
+    /**
+     * use 展开：把 trait 的方法/属性/常量复制进 $sym（PHP zend_inheritance.c 的
+     * zend_traits_copy_functions 同构）。规则：
+     *  - 类自身成员优先（已注册 → 跳过）；
+     *  - 两个 trait 的同名非抽象方法冲突 → 编译错误（需 insteadof / as 解决）；
+     *  - 抽象方法不冲突（保留已有具体实现）；
+     *  - insteadof 排除被让位 trait 的方法；as 生成别名或改可见性。
+     *
+     * @param list<UseTraitDecl> $useTraits
+     */
+    private function applyUseTraits(ClassSymbol $sym, array $useTraits): void
+    {
+        foreach ($useTraits as $use) {
+            $excluded = [];
+            foreach ($use->insteadofs as $io) {
+                $excluded[$io['instead'] . '::' . $io['method']] = true;
+            }
+            foreach ($use->traits as $traitName) {
+                $trait = $this->table->traits[$traitName] ?? null;
+                if ($trait === null) {
+                    $this->error("trait '{$traitName}' 不存在", $use->pos);
+                    continue;
+                }
+                foreach ($trait->methods as $mName => $mFn) {
+                    if (isset($excluded[$traitName . '::' . $mName])) {
+                        continue; // insteadof 让位
+                    }
+                    $existing = $sym->methods[$mName] ?? null;
+                    if ($existing !== null) {
+                        if ($existing->fromTrait === null) {
+                            continue; // 类自身优先
+                        }
+                        if ($existing->isAbstract && !$mFn->isAbstract) {
+                            // 具体实现覆盖抽象声明（继续走注册覆盖）
+                        } elseif ($mFn->isAbstract) {
+                            continue; // 保留已有实现
+                        } else {
+                            $this->error(
+                                "trait 方法冲突：{$traitName}::{$mName}() 与 {$existing->fromTrait}::{$mName}() "
+                                . '（用 insteadof 选择实现，或用 as 取别名）',
+                                $mFn->pos,
+                            );
+                            continue;
+                        }
+                    }
+                    $sym->methods[$mName] = $this->copyTraitMethod($sym, $mFn, null, null, $traitName);
+                }
+                foreach ($trait->props as $pName => $pSym) {
+                    if (isset($sym->props[$pName])) {
+                        continue; // 类自身 / 先到的 trait 优先（同名不同类型 PHP 报错，此处从简）
+                    }
+                    $copy = clone $pSym;
+                    $copy->owner = $sym;
+                    $sym->props[$pName] = $copy;
+                }
+                foreach ($trait->consts as $cName => $cSym) {
+                    if (isset($sym->consts[$cName])) {
+                        continue; // 类自身优先（trait 常量同名冲突从简跳过）
+                    }
+                    $sym->consts[$cName] = $cSym;
+                }
+            }
+            foreach ($use->aliases as $al) {
+                $trait = $this->table->traits[$al['trait']] ?? null;
+                $src = $trait?->methods[$al['method']] ?? null;
+                if ($src === null) {
+                    $this->error("trait '{$al['trait']}' 没有方法 {$al['method']}()", $use->pos);
+                    continue;
+                }
+                if ($al['alias'] === null) {
+                    // 仅改可见性：作用于已展开的方法
+                    $target = $sym->methods[$al['method']] ?? null;
+                    if ($target !== null && $al['vis'] !== null) {
+                        $target->vis = $al['vis'];
+                    }
+                    continue;
+                }
+                if (isset($sym->methods[$al['alias']])) {
+                    $this->error("as 别名 '{$al['alias']}' 与已有方法冲突", $use->pos);
+                    continue;
+                }
+                $sym->methods[$al['alias']] = $this->copyTraitMethod($sym, $src, $al['alias'], $al['vis'], $al['trait']);
+            }
+        }
+    }
+
+    /** 复制 trait 方法到使用类（单态化：owner = 使用类，body 共享，fromTrait 溯源）。 */
+    private function copyTraitMethod(ClassSymbol $sym, FnSymbol $src, ?string $aliasName, ?string $vis, string $traitName): FnSymbol
+    {
+        $name = $aliasName ?? $src->name;
+        $fn = new FnSymbol(
+            $name,
+            $src->pos,
+            isMethod: true,
+            ownerClass: $sym,
+            isStatic: $src->isStatic,
+            isCtor: $name === '__construct',
+            isDtor: $name === '__destruct',
+            vis: $vis ?? $src->vis,
+            isAbstract: $src->isAbstract,
+            isFinal: $src->isFinal,
+        );
+        $fn->ret = $src->ret;
+        $fn->params = $src->params;
+        $fn->body = $src->body;
+        $fn->fromTrait = $traitName;
+        $fn->ordinal = ++$this->methodOrdinal;
+        return $fn;
     }
 
     /** 注册 C 符号名（跨命名空间查重）。 */
@@ -97,6 +234,28 @@ trait CheckDeclTrait
                 $sym = new ClassSymbol($fq, $this->table->allocClassCode(), null, $decl->pos);
                 $this->table->addClass($sym);
                 $this->registerCSymbol('tphp_class_' . Type::mangleName($fq), $fq, $decl->pos);
+            }
+        }
+    }
+
+    /** 注册 trait 符号（不生成结构体；成员展开见 registerTraitMembers / applyUseTraits）。 */
+    private function collectTraits(array $files): void
+    {
+        foreach ($files as $file) {
+            $prefix = $this->fqPrefix($file);
+            foreach ($file->decls as $decl) {
+                if (!$decl instanceof TraitDecl) {
+                    continue;
+                }
+                $fq = $prefix . $decl->name;
+                if (isset($this->table->traits[$fq]) || isset($this->table->classes[$fq])
+                    || isset($this->table->ifaces[$fq])) {
+                    $this->error("trait '{$fq}' 重复定义或与类/接口名冲突", $decl->pos);
+                    continue;
+                }
+                $sym = new ClassSymbol($fq, $this->table->allocClassCode(), null, $decl->pos);
+                $sym->isTrait = true;
+                $this->table->traits[$fq] = $sym;
             }
         }
     }
@@ -245,16 +404,41 @@ trait CheckDeclTrait
                     continue;
                 }
                 $sym = $this->table->classes[$prefix . $decl->name];
+                $sym->isFinal = $decl->isFinal;
+                $sym->isAbstract = $decl->isAbstract;
                 if ($decl->extends !== null) {
                     $parent = $this->table->classes[$decl->extends] ?? null;
                     if ($parent === null) {
-                        $this->error("父类 '{$decl->extends}' 不存在", $decl->pos);
+                        if (isset($this->table->traits[$decl->extends])) {
+                            $this->error("不能继承 trait '{$decl->extends}'（trait 只能 use）", $decl->pos);
+                        } else {
+                            $this->error("父类 '{$decl->extends}' 不存在", $decl->pos);
+                        }
                     } elseif ($parent === $sym || $parent->isSubclassOf($sym)) {
                         $this->error("类 '{$decl->name}' 存在循环继承", $decl->pos);
+                    } elseif ($parent->isFinal) {
+                        $this->error("不能继承 final 类 '{$parent->name}'", $decl->pos);
                     } else {
                         $sym->parent = $parent;
                     }
                 }
+            }
+        }
+
+        // trait 成员注册（含嵌套 use 展开）：必须早于类的 use 展开
+        foreach ($files as $file) {
+            $prefix = $this->fqPrefix($file);
+            foreach ($file->decls as $decl) {
+                if (!$decl instanceof TraitDecl) {
+                    continue;
+                }
+                $sym = $this->table->traits[$prefix . $decl->name] ?? null;
+                if ($sym === null) {
+                    continue;
+                }
+                $this->curClass = $sym;
+                $this->registerTraitMembers($sym, $decl);
+                $this->curClass = null;
             }
         }
 
@@ -285,6 +469,8 @@ trait CheckDeclTrait
                     $this->registerMethod($sym, $method);
                     $this->curClass = null;
                 }
+                // trait 展开（类自身成员已注册 → 类优先；冲突规则见 applyUseTraits）
+                $this->applyUseTraits($sym, $decl->useTraits);
                 $this->buildVtable($sym);
             }
         }
@@ -296,6 +482,7 @@ trait CheckDeclTrait
                     $sym = $this->table->classes[$this->fqPrefix($file) . $decl->name] ?? null;
                     if ($sym !== null) {
                         $this->validateImplements($sym);
+                        $this->validateAbstractMembers($sym);
                     }
                 }
             }
@@ -409,9 +596,37 @@ trait CheckDeclTrait
         $sym->props[$prop->name] = $var;
     }
 
-    private function registerMethod(ClassSymbol $sym, object $method): void
+    /**
+     * 抽象成员校验：并集自身与父链的方法（最近声明优先），
+     * 仍为 abstract 的即为"未实现"——非抽象类有未实现项则报错。
+     */
+    private function validateAbstractMembers(ClassSymbol $sym): void
     {
-        if (isset($sym->methods[$method->name])) {
+        $nearest = [];
+        for ($c = $sym; $c !== null; $c = $c->parent) {
+            foreach ($c->methods as $name => $m) {
+                if (!isset($nearest[$name])) {
+                    $nearest[$name] = $m; // 子类覆盖优先
+                }
+            }
+        }
+        $missing = [];
+        foreach ($nearest as $name => $m) {
+            if ($m->isAbstract) {
+                $missing[] = $name . '()';
+            }
+        }
+        if ($missing !== [] && !$sym->isAbstract) {
+            $this->error(
+                "类 {$sym->name} 有未实现的抽象方法：" . implode('、', $missing)
+                . '（需实现全部抽象方法，或将类声明为 abstract）',
+                $sym->pos,
+            );
+        }
+    }
+
+    private function registerMethod(ClassSymbol $sym, object $method): void
+    {        if (isset($sym->methods[$method->name])) {
             $this->error("方法 '{$method->name}' 在类 {$sym->name} 中重复定义", $method->ret?->pos);
             return;
         }
@@ -424,10 +639,40 @@ trait CheckDeclTrait
             isCtor: $method->name === '__construct',
             isDtor: $method->name === '__destruct',
             vis: $method->vis,
+            isAbstract: $method->isAbstract ?? false,
+            isFinal: $method->isFinal ?? false,
         );
+        if ($fn->isAbstract) {
+            if ($fn->vis === 'private') {
+                $this->error("抽象方法 '{$method->name}' 不能是 private（子类无法实现）", $method->ret?->pos);
+            }
+            // 抽象构造器 / 析构器合法（PHP 语义，zend_compile.c 无相应禁止）：子类必须给出实现
+        } elseif ($fn->isFinal && $fn->vis === 'private' && !$fn->isCtor) {
+            // 对齐 PHP（zend_compile.c:8259）：private 方法永远不被重写，final 冗余。
+            // PHP 仅对构造函数豁免（!zend_is_constructor），此处保持一致。
+            $this->errors->warn(
+                "private 方法 '{$method->name}' 声明为 final 没有意义（private 方法不参与重写）",
+                $method->ret?->pos,
+            );
+        }
         $fn->ret = $method->ret !== null ? $this->resolveTypeRef($method->ret) : Type::I_VOID;
         $this->registerParams($fn, $method->params);
+        $fn->body = $method->body;
+        $fn->ordinal = ++$this->methodOrdinal;
         $sym->methods[$method->name] = $fn;
+        // 重写校验：父链上的同名方法不可为 final
+        if ($sym->parent !== null) {
+            $inherited = $sym->parent->findMethod($method->name);
+            if ($inherited !== null && $inherited->isFinal) {
+                $this->error(
+                    "不能重写 final 方法 {$inherited->ownerClass->name}::{$method->name}()",
+                    $method->ret?->pos,
+                );
+            }
+            if ($inherited !== null && $inherited->isAbstract && $fn->isAbstract) {
+                // 子类仍抽象：允许（继续由更下层实现）
+            }
+        }
     }
 
     /** @param list<object> $params */
@@ -700,24 +945,23 @@ trait CheckDeclTrait
                 if ($decl instanceof ClassDecl) {
                     $sym = $this->table->classes[$this->fqPrefix($file) . $decl->name];
                     $this->curClass = $sym;
-                    foreach ($decl->methods as $method) {
-                        $fn = $sym->methods[$method->name] ?? null;
-                        if ($fn === null) {
-                            continue;
+                    // 遍历方法符号（含 trait 展开的方法）：body 挂在符号上
+                    foreach ($sym->methods as $fn) {
+                        if ($fn->isAbstract || $fn->body === null) {
+                            continue; // 抽象方法无函数体
                         }
-                        $this->checkFnBody($fn, $method->body);
+                        $this->checkFnBody($fn, $fn->body);
                     }
                     $this->curClass = null;
                 }
                 if ($decl instanceof EnumDecl) {
                     $sym = $this->table->classes[$this->fqPrefix($file) . $decl->name];
                     $this->curClass = $sym;
-                    foreach ($decl->methods as $method) {
-                        $fn = $sym->methods[$method->name] ?? null;
-                        if ($fn === null) {
+                    foreach ($sym->methods as $fn) {
+                        if ($fn->isAbstract || $fn->body === null) {
                             continue;
                         }
-                        $this->checkFnBody($fn, $method->body);
+                        $this->checkFnBody($fn, $fn->body);
                     }
                     $this->curClass = null;
                 }

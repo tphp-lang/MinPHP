@@ -85,6 +85,11 @@ enum TokenKind
     case KwBool;
     case KwString;
     case KwArray;
+    case KwFinal;
+    case KwAbstract;
+    case KwInstanceof;
+    case KwTrait;
+    case KwInsteadof;
     case KwMap;
     case KwCallable;
     case KwVoid;

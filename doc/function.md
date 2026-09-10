@@ -55,6 +55,25 @@ $parts[] = "c";
 implode("-", $parts); // "a-b-c"
 ```
 
+## array_keys
+
+`map<K,V>` 的键收集为 `array<K>` -> `array<K>`。**map 的遍历入口**：
+配合 foreach + 下标读使用（哈希无序，不保证键序）。
+
+| 参数名 | 类型 |
+|---- | ---- |
+| $m | `map<K,V>` |
+
+例子:
+
+```php
+map<string,int> $score = ["a" => 1, "b" => 2];
+int $total = 0;
+foreach (array_keys($score) as $k) {
+    $total = $total + $score[$k];
+}
+```
+
 
 ## var_dump
 

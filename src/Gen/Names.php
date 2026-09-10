@@ -57,6 +57,18 @@ final class Names
         return 'tphp_vti_' . self::mangle($name);
     }
 
+    /** 祖先类 id 链数组（instanceof 元信息）。 */
+    public static function typeChain(string $name): string
+    {
+        return 'tphp_tchain_' . self::mangle($name);
+    }
+
+    /** 实现接口 id 集数组（instanceof 元信息）。 */
+    public static function typeIfaces(string $name): string
+    {
+        return 'tphp_tifaces_' . self::mangle($name);
+    }
+
     public static function method(string $class, string $method): string
     {
         return 'tphp_class_' . self::mangle($class) . '_' . $method;

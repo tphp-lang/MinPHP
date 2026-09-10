@@ -23,6 +23,13 @@ trait GenDeclTrait
     /** 当前函数返回类型（return 接口包装 / or 传播零值用）。 */
     private int $curRet = 0;
 
+    /**
+     * or 上下文：正在生成 `call or { ... }` 的调用表达式。
+     * 此时调用不做错误传播（不 return），而是"有挂起错误则跳过本次调用"，
+     * 使链式调用中任一环失败都短路到外层 or 块（见 wrapFailable / emitNullCheck）。
+     */
+    private bool $inOrContext = false;
+
     /** 当前函数是否插深度保护（调用环检测收敛；闭包恒 true——thunk 静态不可分析）。 */
     private bool $curDepthGuard = true;
 
@@ -50,10 +57,11 @@ trait GenDeclTrait
                     if ($class === null) {
                         continue;
                     }
-                    foreach ($decl->methods as $method) {
-                        $fn = $class->methods[$method->name] ?? null;
-                        if ($fn !== null) {
-                            $items[] = [$fn, $method->body, $class];
+                    // 遍历方法符号（含 trait 展开的方法，body 挂在符号上）
+                    foreach ($class->methods as $fn) {
+                        // 抽象方法无函数体：不生成实现（子类必须提供，vtable 槽由其填充）
+                        if (!$fn->isAbstract && $fn->body !== null) {
+                            $items[] = [$fn, $fn->body, $class];
                         }
                     }
                 }
@@ -189,10 +197,9 @@ trait GenDeclTrait
             foreach ($classes as $class) {
                 $struct = Names::classStruct($class->name);
                 $this->w('typedef struct ' . $struct . ' ' . $struct . ';');
-                if ($class->vtableOrder !== []) {
-                    $vt = Names::vtableType($class->name);
-                    $this->w('typedef struct ' . $vt . ' ' . $vt . ';');
-                }
+                // 所有类都生成 vtable 类型（instanceof 需要 vt 恒非 NULL；含仅类型头的空 vtable）
+                $vt = Names::vtableType($class->name);
+                $this->w('typedef struct ' . $vt . ' ' . $vt . ';');
             }
             $this->w('');
             foreach ($classes as $class) {
@@ -216,6 +223,28 @@ trait GenDeclTrait
                 $this->w('static ' . $this->cType($prop->type) . ' ' . $global . ' = ' . $init . ';');
             }
         }
+        // instanceof 类型元信息：祖先类 id 链（含自身）+ 接口 id 集（含经父类/接口继承的闭包）
+        foreach ($classes as $class) {
+            $chain = [];
+            for ($c = $class; $c !== null; $c = $c->parent) {
+                $chain[] = $c->code;
+            }
+            $chain[] = -1;
+            $this->w('static const int32_t ' . Names::typeChain($class->name) . '[] = { '
+                . implode(', ', $chain) . ' };');
+            $ifaces = [];
+            for ($c = $class; $c !== null; $c = $c->parent) {
+                foreach ($c->implements as $iface) {
+                    foreach ($iface->extendsClosure() as $anc) {
+                        $ifaces[$anc->code] = true;
+                    }
+                }
+            }
+            $ids = array_keys($ifaces);
+            $ids[] = -1;
+            $this->w('static const int32_t ' . Names::typeIfaces($class->name) . '[] = { '
+                . implode(', ', $ids) . ' };');
+        }
     }
 
     /** vtable 槽位的原始声明类（保持与基类 vtable 的前缀布局兼容）。 */
@@ -236,12 +265,11 @@ trait GenDeclTrait
 
     private function emitVtableStruct(ClassSymbol $class): void
     {
-        if ($class->vtableOrder === []) {
-            return;
-        }
         $vt = Names::vtableType($class->name);
         $this->w('struct ' . $vt . ' {');
         $this->indent = 1;
+        // 类型头（instanceof 元信息）：所有 vtable 同前缀，方法偏移一致
+        $this->w('TphpVTHead __tphp_head;');
         foreach ($class->vtableOrder as $methodName) {
             $slotClass = $this->slotDeclaringClass($class, $methodName);
             $fn = $this->findMethodSym($class, $methodName);
@@ -259,6 +287,7 @@ trait GenDeclTrait
     {
         $this->w('static const ' . Names::vtableType($class->name) . ' ' . Names::vtableInstance($class->name) . ' = {');
         $this->indent = 1;
+        $this->w('{ ' . Names::typeChain($class->name) . ', ' . Names::typeIfaces($class->name) . ' },');
         foreach ($class->vtableOrder as $methodName) {
             // 槽位对应的最终实现：本类或最近的父类声明（子类重写优先）。
             // 重写实现的 self 参数类型是重写类，与槽位的基类指针不同，需显式转型。
@@ -457,11 +486,12 @@ trait GenDeclTrait
                 }
                 $this->w($this->newHelperSignature($class) . ';');
             }
-            // vtable 实例必须在全部方法原型之后（静态初始化器引用函数地址）
+            // 所有类都生成 vtable（含仅类型头的空 vtable）——instanceof 依赖 vt 恒非 NULL；
+            // 抽象类不被实例化：其 vtable 无对象引用（槽位可能指向无体方法），跳过实例
             $this->w('');
             $this->w('/* ---- vtable 实例 ---- */');
             foreach ($classes as $class) {
-                if ($class->vtableOrder !== []) {
+                if (!$class->isAbstract) {
                     $this->emitVtableInstance($class);
                 }
             }
@@ -512,6 +542,10 @@ trait GenDeclTrait
                 $this->genEnumMembers($class);
                 continue;
             }
+            if ($class->isAbstract) {
+                // 抽象类不可实例化：不生成 new 辅助（其 vtable 实例亦已跳过）
+                continue;
+            }
             $this->genNewHelper($class);
         }
         // dump 组合函数在正文生成时被发现，这里统一落到 helpers 节
@@ -541,7 +575,8 @@ trait GenDeclTrait
             $ptr = 'tphp_e_' . Names::mangle($class->name) . '_' . $c['name'];
             $this->w('{');
             $this->indent = 1;
-            $this->w($struct . '* o = (' . $struct . '*)tphp_object_alloc_static(sizeof(' . $struct . '), NULL, NULL);');
+            $this->w($struct . '* o = (' . $struct . '*)tphp_object_alloc_static(sizeof(' . $struct . '), (void *)&'
+                . Names::vtableInstance($class->name) . ', NULL);');
             $this->w('o->name = ' . $this->strLitExpr($c['name']) . ';');
             if ($class->enumBacking === Type::I_STRING) {
                 $v = $c['value'];
@@ -751,9 +786,7 @@ trait GenDeclTrait
         $this->w($this->newHelperSignature($class));
         $this->w('{');
         $this->indent = 1;
-        $vtInit = $class->vtableOrder !== []
-            ? '(void *)&' . Names::vtableInstance($class->name)
-            : 'NULL';
+        $vtInit = '(void *)&' . Names::vtableInstance($class->name); // 所有类都有 vtable（instanceof 元信息）
         $this->w($struct . ' *self = (' . $struct . ' *)tphp_object_alloc(sizeof(' . $struct . '), '
             . $vtInit . ', ' . $dtorName . ');');
 
@@ -769,6 +802,8 @@ trait GenDeclTrait
                     : Names::localVar($param->name);
             }
             $this->w(Names::method($ctorOwner->name, '__construct') . '(' . implode(', ', $args) . ');');
+            // 构造抛错 → 对象未建成（PHP 语义）：释放半成品并返回 NULL，避免调用方丢弃时泄漏
+            $this->w('if (tphp_err_has()) { tphp_object_unref(self); return NULL; }');
         }
         $this->w('return self;');
         $this->indent = 0;

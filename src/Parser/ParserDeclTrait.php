@@ -15,6 +15,8 @@ use Tphp\Ast\decl\EnumDecl;
 use Tphp\Ast\decl\FunctionDecl;
 use Tphp\Ast\decl\InterfaceDecl;
 use Tphp\Ast\decl\InterfaceMethod;
+use Tphp\Ast\decl\TraitDecl;
+use Tphp\Ast\decl\UseTraitDecl;
 use Tphp\Ast\decl\Param;
 use Tphp\Ast\expr\IntLit;
 use Tphp\Token\Token;
@@ -83,9 +85,22 @@ trait ParserDeclTrait
                 $decls[] = $this->parseEnumDecl();
                 continue;
             }
+            if ($this->is(TokenKind::KwFinal) || $this->is(TokenKind::KwAbstract)) {
+                // final class / abstract class（前置修饰符；同一修饰符重复或同用报错）
+                $isFinal = $this->match(TokenKind::KwFinal);
+                $isAbstract = !$isFinal && $this->match(TokenKind::KwAbstract);
+                if (!$this->match(TokenKind::KwClass)) {
+                    $this->errHere('final / abstract 仅可用于类声明与方法声明');
+                    $this->next();
+                    continue;
+                }
+                $declared = true;
+                $decls[] = $this->parseClassRest($isFinal, $isAbstract);
+                continue;
+            }
             if ($this->match(TokenKind::KwClass)) {
                 $declared = true;
-                $decls[] = $this->parseClassRest();
+                $decls[] = $this->parseClassRest(false, false);
                 continue;
             }
             if ($this->match(TokenKind::KwConst)) {
@@ -96,6 +111,11 @@ trait ParserDeclTrait
             if ($this->match(TokenKind::KwInterface)) {
                 $declared = true;
                 $decls[] = $this->parseInterfaceRest();
+                continue;
+            }
+            if ($this->match(TokenKind::KwTrait)) {
+                $declared = true;
+                $decls[] = $this->parseTraitRest();
                 continue;
             }
             if ($this->is(TokenKind::KwNamespace)) {
@@ -504,7 +524,7 @@ trait ParserDeclTrait
         return $params;
     }
 
-    private function parseClassRest(): object
+    private function parseClassRest(bool $isFinal, bool $isAbstract): object
     {
         $nameTok = $this->expect(TokenKind::Ident, '类名');
         $name = $nameTok->lit;
@@ -518,27 +538,78 @@ trait ParserDeclTrait
             } while ($this->match(TokenKind::Comma));
         }
         $this->expect(TokenKind::Lbrace, "'{'");
+        [$props, $methods, $classConsts, $useTraits] = $this->parseMemberList();
+        $this->expect(TokenKind::Rbrace, "'}'");
+        $decl = new ClassDecl($name, $extends, $props, $methods, $classConsts, $implements, $isFinal, $isAbstract, $useTraits);
+        $decl->pos = $nameTok->pos;
+        return $decl;
+    }
 
+    /** trait 声明（成员语法与类一致，含嵌套 use）。 */
+    private function parseTraitRest(): object
+    {
+        $nameTok = $this->expect(TokenKind::Ident, 'trait 名');
+        $this->expect(TokenKind::Lbrace, "'{'");
+        [$props, $methods, $classConsts, $useTraits] = $this->parseMemberList();
+        $this->expect(TokenKind::Rbrace, "'}'");
+        $decl = new TraitDecl($nameTok->lit, $props, $methods, $classConsts, $useTraits);
+        $decl->pos = $nameTok->pos;
+        return $decl;
+    }
+
+    /**
+     * 类体 / trait 体的成员列表（含 use 语句）。
+     *
+     * @return array{0: list<ClassProp>, 1: list<ClassMethod>, 2: list<ClassConstDecl>, 3: list<UseTraitDecl>}
+     */
+    private function parseMemberList(): array
+    {
         $props = [];
         $methods = [];
         $classConsts = [];
+        $useTraits = [];
         while (!$this->is(TokenKind::Rbrace) && !$this->is(TokenKind::Eof)) {
             if ($this->is(TokenKind::DirExport)) {
                 $this->errHere('#[export] 仅全局函数有效，不能标注类成员');
                 $this->next();
                 continue;
             }
-            $vis = 'public';
-            if ($this->match(TokenKind::KwPublic)) {
-                $vis = 'public';
-            } elseif ($this->match(TokenKind::KwPrivate)) {
-                $vis = 'private';
-            } elseif ($this->match(TokenKind::KwProtected)) {
-                $vis = 'protected';
+            if ($this->match(TokenKind::KwUse)) {
+                $useTraits[] = $this->parseUseTrait();
+                continue;
             }
-            $isStatic = $this->match(TokenKind::KwStatic);
+            $vis = 'public';
+            $isStatic = false;
+            $isAbstractMember = false;
+            $isFinalMember = false;
+            // 成员修饰符（任意顺序：vis / static / abstract / final）
+            while (true) {
+                if ($this->match(TokenKind::KwPublic)) {
+                    $vis = 'public';
+                } elseif ($this->match(TokenKind::KwPrivate)) {
+                    $vis = 'private';
+                } elseif ($this->match(TokenKind::KwProtected)) {
+                    $vis = 'protected';
+                } elseif ($this->match(TokenKind::KwStatic)) {
+                    $isStatic = true;
+                } elseif ($this->match(TokenKind::KwAbstract)) {
+                    $isAbstractMember = true;
+                } elseif ($this->match(TokenKind::KwFinal)) {
+                    $isFinalMember = true;
+                } else {
+                    break;
+                }
+            }
 
             if ($this->match(TokenKind::KwConst)) {
+                if ($isAbstractMember) {
+                    $this->errHere('abstract 不能修饰类常量（PHP 亦不允许）');
+                }
+                if ($isFinalMember && $vis === 'private') {
+                    // 对齐 PHP（zend_compile.c:9035）：private 常量对其它类不可见，final 无意义
+                    $this->errHere('private 常量不能声明 final（对其它类不可见，final 无意义）');
+                }
+                // final 类常量：PHP 8.1+ 语法；本语言常量本就不可被子类重定义，语义天然满足
                 // 类常量：类型必填（与旧版一致）
                 $typeRef = $this->parseTypeRef();
                 $cnameTok = $this->expect(TokenKind::Ident, '常量名');
@@ -555,13 +626,23 @@ trait ParserDeclTrait
                 $mnameTok = $this->expect(TokenKind::Ident, '方法名');
                 $params = $this->parseParamList();
                 $ret = $this->match(TokenKind::Colon) ? $this->parseTypeRef() : null;
-                $body = $this->parseBracedBlock();
-                $method = new ClassMethod($vis, $isStatic, $mnameTok->lit, $params, $ret, $body);
+                if ($isAbstractMember) {
+                    // 抽象方法：声明以 ';' 结束，无函数体
+                    $this->expect(TokenKind::Semicolon, "';'（抽象方法无函数体）");
+                    $body = [];
+                } else {
+                    $body = $this->parseBracedBlock();
+                }
+                $method = new ClassMethod($vis, $isStatic, $mnameTok->lit, $params, $ret, $body, $isAbstractMember, $isFinalMember);
                 $method->pos = $mnameTok->pos;
                 $methods[] = $method;
                 continue;
             }
 
+            if ($isAbstractMember) {
+                $this->errHere('abstract 只能修饰方法');
+            }
+            // final 属性：PHP 8.4+ 语法；本语言本就禁止属性遮蔽，语义天然满足
             $typeRef = $this->parseTypeRef();
             $pname = substr($this->expect(TokenKind::Var, '属性名')->lit, 1);
             $hasDefault = false;
@@ -575,9 +656,61 @@ trait ParserDeclTrait
             $prop->pos = $typeRef->pos;
             $props[] = $prop;
         }
-        $this->expect(TokenKind::Rbrace, "'}'");
-        $decl = new ClassDecl($name, $extends, $props, $methods, $classConsts, $implements);
-        $decl->pos = $nameTok->pos;
+        return [$props, $methods, $classConsts, $useTraits];
+    }
+
+    /**
+     * use 语句（类/trait 体内）：use A, B; 或带冲突解决块
+     * { A::m insteadof B; B::m as alias; B::m as private; }
+     */
+    private function parseUseTrait(): UseTraitDecl
+    {
+        $start = $this->peek()->pos;
+        $traits = [];
+        do {
+            $traits[] = $this->resolveClassName($this->parseQualifiedName());
+        } while ($this->match(TokenKind::Comma));
+        $insteadofs = [];
+        $aliases = [];
+        if ($this->match(TokenKind::Lbrace)) {
+            while (!$this->is(TokenKind::Rbrace) && !$this->is(TokenKind::Eof)) {
+                $traitName = $this->resolveClassName($this->parseQualifiedName());
+                $this->expect(TokenKind::DoubleColon, "'::'");
+                $method = $this->expect(TokenKind::Ident, '方法名')->lit;
+                if ($this->match(TokenKind::KwInsteadof)) {
+                    $instead = $this->resolveClassName($this->parseQualifiedName());
+                    $this->expect(TokenKind::Semicolon, "';'");
+                    $insteadofs[] = ['trait' => $traitName, 'method' => $method, 'instead' => $instead];
+                    continue;
+                }
+                if ($this->match(TokenKind::KwAs)) {
+                    $vis = null;
+                    if ($this->match(TokenKind::KwPublic)) {
+                        $vis = 'public';
+                    } elseif ($this->match(TokenKind::KwProtected)) {
+                        $vis = 'protected';
+                    } elseif ($this->match(TokenKind::KwPrivate)) {
+                        $vis = 'private';
+                    }
+                    $alias = null;
+                    if ($this->is(TokenKind::Ident)) {
+                        $alias = $this->next()->lit;
+                    }
+                    $this->expect(TokenKind::Semicolon, "';'");
+                    $aliases[] = ['trait' => $traitName, 'method' => $method, 'alias' => $alias, 'vis' => $vis];
+                    continue;
+                }
+                $this->errHere("use 块中期望 'insteadof' 或 'as'");
+                $this->next();
+            }
+            $this->expect(TokenKind::Rbrace, "'}'");
+            // 块形式不带分号（PHP 语义）；容错接受多余分号
+            $this->match(TokenKind::Semicolon);
+        } else {
+            $this->expect(TokenKind::Semicolon, "';'");
+        }
+        $decl = new UseTraitDecl($traits, $insteadofs, $aliases);
+        $decl->pos = $start;
         return $decl;
     }
 

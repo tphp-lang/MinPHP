@@ -17,6 +17,7 @@ use Tphp\Ast\expr\CastExpr;
 use Tphp\Ast\expr\ClosureExpr;
 use Tphp\Ast\expr\FloatLit;
 use Tphp\Ast\expr\IndexExpr;
+use Tphp\Ast\expr\InstanceOfExpr;
 use Tphp\Ast\expr\IntLit;
 use Tphp\Ast\expr\InterpStr;
 use Tphp\Ast\expr\InvokeExpr;
@@ -185,6 +186,7 @@ trait ParserExprTrait
             TokenKind::Shl, TokenKind::Shr => 8,
             TokenKind::Dot, TokenKind::Plus, TokenKind::Minus => 9,
             TokenKind::Star, TokenKind::Slash, TokenKind::Percent => 10,
+            TokenKind::KwInstanceof => 11, // 高于乘除、低于前缀一元（PHP 优先级）
             default => 0,
         };
     }
@@ -198,9 +200,32 @@ trait ParserExprTrait
                 return $left;
             }
             $op = $this->next()->kind;
+            if ($op === TokenKind::KwInstanceof) {
+                // 右侧是类型名而非表达式（$x instanceof $var 动态类名不支持）
+                $left = $this->parseInstanceofRhs($left);
+                continue;
+            }
             $right = $this->parseBinary($prec + 1);
             $left = $this->at(new BinaryExpr($op, $left, $right), $left->pos);
         }
+    }
+
+    /** instanceof 右侧：类名 / 接口名（含 \ 限定与前导 \）。 */
+    private function parseInstanceofRhs(Expr $left): Expr
+    {
+        if ($this->is(TokenKind::Var)) {
+            $t = $this->peek();
+            $this->errHere('instanceof 右侧只支持类名或接口名（不支持动态类名——AOT 无运行期类型表查找）');
+            $this->next();
+            return $this->at(new InstanceOfExpr($left, '<error>'), $t->pos);
+        }
+        $nameTok = $this->expect(TokenKind::Ident, '类名或接口名');
+        $name = $nameTok->lit;
+        while ($this->is(TokenKind::Backslash)) {
+            $this->next();
+            $name .= '\\' . $this->expect(TokenKind::Ident, '名字')->lit;
+        }
+        return $this->at(new InstanceOfExpr($left, $this->resolveClassName($name)), $nameTok->pos);
     }
 
     private function parseUnary(): Expr
@@ -258,9 +283,10 @@ trait ParserExprTrait
                 $e = $this->at(new PostfixExpr($kind, $e), $e->pos);
                 continue;
             }
-            // f() or { ... } / $f() or { ... }：调用可带错误处理块
+            // 调用/构造可带错误处理块：f() / $f() / $o->m() / X::m() / new X() or { ... }
             if ($kind === TokenKind::KwOr && $this->peekKindAt(1) === TokenKind::Lbrace
-                && ($e instanceof CallExpr || $e instanceof InvokeExpr)) {
+                && ($e instanceof CallExpr || $e instanceof InvokeExpr || $e instanceof MethodCall
+                    || $e instanceof StaticCall || $e instanceof NewExpr)) {
                 $this->next(); // or
                 $block = $this->parseBracedBlock();
                 $e = $this->at(new OrExpr($e, $block), $e->pos);

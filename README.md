@@ -55,7 +55,7 @@ Uncaught error: not ready
 php main.php run examples/01_hello.php       # 编译并运行（exe 在当前目录，C 源码在 build/）
 php main.php build examples/04_class.php     # 只编译出 04_class.exe（当前目录）
 php main.php build examples/02_control.php --emit-c   # 只生成 C 源码（build/ 目录，可直接阅读）
-php tests/run.php                            # 跑测试（44 个用例，含多文件/内存/推断/phpc/可见性/闭包/heredoc/枚举/析构/指令安全/平台条件）
+php tests/run.php                            # 跑测试（64 个用例，含多文件/内存/推断/phpc/可见性/闭包/heredoc/枚举/析构/指令安全/平台条件/map/trait/abstract/instanceof/运行时 panic）
 php tests/shared.php                         # 库模式测试（shared 命令 + #[export] 符号导出）
 php tests/dot.php                            # `.` 指令测试（递归展开 + 排除规则）
 php tests/cross.php                          # 交叉编译测试（4 个目标）
@@ -163,7 +163,8 @@ class Main
 强类型 PHP 子集，语义按 C 设计：
 
 - **类型**（`doc/type.md`）：`int`(i32)、`float`(f64，PHP 语义；`double` 为别名)、`bool`、
-  不可变 `string`（SSO）、`array<T>`（纯列表）、`callable`、类类型（指针，可 null）、
+  不可变 `string`（SSO）、`array<T>`（纯列表）、`map<K,V>`（关联数组，K 限 int/string）、
+  `callable`、类类型（指针，可 null）、
   接口类型（Go itab 风格胖指针，可 null）、
   以及完整的 `c.*` 定宽别名（32 位浮点用 `c.f32`；`c.i8` ~ `c.u128`、`c.f16` ~ `c.f128`、`c.ptr`）
 - **变量**：PHP 类型自动推导（`$x = 5;` 首次赋值定死）；C 侧类型（c.*/cstruct/指针）必须显式声明；显式 `int $x = 1;` 依旧合法；隐式转换仅数值宽化（float → c.f32 收窄仅浮点字面量豁免，float 变量须显式 `(c.f32)` 强转）
@@ -184,10 +185,18 @@ class Main
   `__construct` / `__destruct`（用户析构先于字段释放）、`parent::`、
   `: self` 链式返回；**枚举类**（backed int/string / 纯枚举，case 单例恒等、
   方法/接口/`cases`/`from`/`tryFrom`）；`Main::__construct(int $argc, array<string> $argv)` 可接收命令行参数
-- **错误处理**：`throw "msg";` 抛出；错误自动沿调用链上浮；`f() or { ... }` 处理——
+- **继承修饰与类型判断**：`final class`（不可继承）/ `final` 方法（不可重写）、
+  `abstract class` + `abstract` 方法（子类必须实现；语义经 php-src 源码核对）；
+  `instanceof`（类/子类/接口判定，静态可判定时编译期折叠为常量）
+- **trait**：`use A, B;` 编译期展开为使用类的方法/属性（零运行时痕迹）；
+  类自身成员优先、双 trait 冲突报编译错、`insteadof` / `as` 解决、支持嵌套 use 与抽象方法
+- **错误处理**：`throw "msg";` 抛出；错误自动沿调用链上浮；**任意调用** `or { ... }` 处理
+  （全局函数 / 闭包 `$f()` / 方法 `$o->m()` / 静态 `C::m()` / 构造器 `new C()`；
+  链式 `$a->b()->c() or {...}` 中任一环失败即短路进块，后续环节不再求值）——
   块内 `err` 为错误消息（string），值上下文取块内最后表达式；块内可用 `return`/`break`/`continue`；
   顶层未捕获打印 `Uncaught error:` 并以退出码 1 结束；无任何签名注解
-- **内置**：`echo`（语句）、`len()`、`var_dump()`、phpc 桥接 `c_str` / `php_str` / `php_str_ref` / `cbuf` / `c_own`
+- **内置**：`echo`（语句）、`len()`、`var_dump()`、`implode()`（O(n) 字符串拼接的正解工具）、
+  `array_keys()`（map 键收集，遍历入口）、phpc 桥接 `c_str` / `php_str` / `php_str_ref` / `cbuf` / `c_own`
 - **导出**：`#[export("c_name")]` 注解为全局函数指定 C 符号名（库模式供宿主程序调用；仅顶层 function 有效）
 - **phpc（C 互操作）**：`#include` / `#flag` / `#struct` / `#enum` 指令（路径与选项白名单校验，
   见 `doc/phpc.md`）+ `c->` 直连调用与常量引用；
@@ -195,8 +204,8 @@ class Main
   C 内存自动管理（`cbuf`/`c_own` 登记，函数出口自动 free，开发者不写 free）——详见 `doc/phpc.md`
 - **入口**：`class Main` + `main(): void`
 
-明确不做：动态类型、引用传参、trait/abstract、魔术方法、
-`eval`、运行时 include、map 语义数组（未来提供 `map<K,V>`）。
+明确不做：动态类型、引用传参、魔术方法（`__construct`/`__destruct` 除外）、
+`eval`、运行时 include、`object` 类型、匿名类 —— 评估结论与理由见 `doc/not-doing.md`。
 
 ## 架构
 
@@ -272,4 +281,6 @@ php tests/run.php             # 全部用例
 php tests/run.php 05_class    # 按名字过滤
 ```
 
-用例在 `tests/cases/`，文件头 `// expect:` 块即预期输出，逐行比对。
+用例在 `tests/cases/`，文件头注释声明预期：
+`// expect:` 块为预期输出（逐行比对 + 断言 `leaks=0`）、
+`// expect-error: <子串>` 为期望编译失败、`// expect-panic: <子串>` 为期望运行时 panic（退出码 1）。

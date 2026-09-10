@@ -11,6 +11,7 @@
 | string | String | 不可变值类型；SSO ≤23 字节内联，超限走 bump 池 |
 | bool | bool | true/false |
 | array\<T\> | Array* | 泛型数组（引用类型，见下文） |
+| map\<K,V\> | Map* | 关联数组（K 限 int/string、V 限标量与 string；引用类型，见下文） |
 | callable | Callable | 闭包 / C 函数指针（双字 {fn, env}；env 为捕获环境，doc/closure.md） |
 | void | void | 没有值的数据类型，通常用于函数返回值（仅返回类型，不参与推导） |
 | 类类型 | tphp_class_X* | 编译期单态化为 C struct，变量为指针，可为 null |
@@ -72,7 +73,7 @@ typedef struct {
 ## 数组
 
 纯列表：0 起始连续存储，仅整数下标，越界即运行时报错。
-没有 PHP 的 map 语义（无字符串键、无稀疏索引）——需要字典时未来提供 `map<K,V>`。
+没有 PHP 的 map 语义（无字符串键、无稀疏索引）——关联数组见下文 `map<K,V>` 一节。
 所有 `array<T>` 共享同一个泛型结构（voidptr + element_size 方案），
 元素访问由编译器按静态元素类型生成带越界检查的辅助函数调用。
 
@@ -88,6 +89,35 @@ typedef struct {
 ```
 
 引用语义：赋值共享同一底层数组（指针拷贝）。
+
+## map（关联数组）
+
+`map<K,V>`：键限 `int` / `string`，值限**标量与 `string`**（第一版边界）。
+哈希表（链地址法 + FNV-1a / 整数混合哈希），引用语义（赋值共享底层表）。
+
+```c
+typedef struct TphpMapNode {
+    struct TphpMapNode *next;
+    union { int32_t i; String s; } k;
+    char kv[];              // 值槽（v_size 字节，Gen 按 V 传入）
+} TphpMapNode;
+
+typedef struct {
+    int32_t length;
+    int32_t capacity;       // 桶数（2 的幂，超半数扩容）
+    int32_t refcount;
+    int32_t k_is_string;
+    int32_t v_size;
+    TphpMapNode **buckets;
+} Map;
+```
+
+操作：下标读写 `$m["k"]`（写即插入、重复写覆盖）、`len($m)`、
+`array_keys($m)`（键收集为 `array<K>`，哈希无序不保证键序）、
+全键字面量 `["a" => 1]`、空字面量 `[]` 借目标 map 类型。
+
+**读取缺失键 panic**（不可捕获，与数组越界一致）。
+边界（Checker 明确拒绝）：map 不作类字段 / 数组元素 / 嵌套 map；堆值 V 待内存模型后续版本。
 
 ## 枚举
 

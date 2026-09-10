@@ -17,6 +17,7 @@ use Tphp\Ast\expr\ClosureExpr;
 use Tphp\Ast\expr\FloatLit;
 use Tphp\Ast\expr\IndexExpr;
 use Tphp\Ast\expr\IntLit;
+use Tphp\Ast\expr\InstanceOfExpr;
 use Tphp\Ast\expr\InterpStr;
 use Tphp\Ast\expr\InvokeExpr;
 use Tphp\Ast\expr\MethodCall;
@@ -95,6 +96,9 @@ trait CheckExprTrait
         }
         if ($e instanceof IndexExpr) {
             return $this->checkIndex($e);
+        }
+        if ($e instanceof InstanceOfExpr) {
+            return $this->checkInstanceOf($e);
         }
         if ($e instanceof BinaryExpr) {
             return $this->checkBinary($e);
@@ -629,6 +633,86 @@ trait CheckExprTrait
                 );
             }
         }
+    }
+
+    /** instanceof：左侧须为对象；右侧为类/接口并尝试编译期折叠。 */
+    private function checkInstanceOf(InstanceOfExpr $e): int
+    {
+        $objT = $this->checkExpr($e->obj);
+        if (!$this->table->isClass($objT) && !$this->table->isInterface($objT)) {
+            $this->error(
+                'instanceof 左侧必须是对象（得到 ' . $this->table->displayName($objT) . '）',
+                $e->obj->pos,
+            );
+            return Type::I_BOOL;
+        }
+        $cls = $this->table->classes[$e->class] ?? null;
+        $iface = $this->table->ifaces[$e->class] ?? null;
+        if ($cls === null && $iface === null && isset($this->table->traits[$e->class])) {
+            $this->error("trait '{$e->class}' 不能用于 instanceof（展开后不存在的类型痕迹）", $e->pos);
+            return Type::I_BOOL;
+        }
+        if ($cls === null && $iface === null) {
+            if ($e->class !== '<error>') {
+                $this->error("instanceof 右侧的类/接口 '{$e->class}' 未定义", $e->pos);
+            }
+            return Type::I_BOOL;
+        }
+        $e->folded = $this->foldInstanceOf($objT, $cls, $iface);
+        return Type::I_BOOL;
+    }
+
+    /**
+     * 编译期折叠：静态类型足以判定结果时返回常量，否则 null（运行时判定）。
+     * 规则（单继承下后代集合不相交即可判定 false）：
+     *  - 左侧类型是右侧类的后代 → true；两者无继承关系（类/类）→ false
+     *  - 右侧类是左侧类的后代 → 运行时（实例可能是该类或其子类）
+     *  - 接口参与（左侧为接口，或右侧为接口且左侧类未实现且非 final）→ 运行时
+     */
+    private function foldInstanceOf(int $objT, ?ClassSymbol $cls, ?InterfaceSymbol $iface): ?bool
+    {
+        $objIsClass = $this->table->isClass($objT);
+        $objIsIface = $this->table->isInterface($objT);
+
+        if ($cls !== null) {
+            if ($objT === $cls->code) {
+                return true;
+            }
+            if ($objIsClass) {
+                $sc = $this->table->classByCode($objT);
+                if ($sc === null) {
+                    return null;
+                }
+                if ($sc->isSubclassOf($cls)) {
+                    return true;
+                }
+                if ($cls->isSubclassOf($sc)) {
+                    return null; // 右侧是左侧的后代：实例可能是它
+                }
+                return false; // 类/类无继承关系 → 后代集合不相交
+            }
+            return null; // 左侧是接口：实现类未知
+        }
+
+        // 右侧是接口
+        if ($objIsClass) {
+            $sc = $this->table->classByCode($objT);
+            if ($sc !== null && $this->classImplements($sc, $iface)) {
+                return true;
+            }
+            if ($sc !== null && $sc->isFinal) {
+                return false; // final 类无子类：不会再有人实现该接口
+            }
+            return null; // 子类可能实现
+        }
+        if ($objIsIface) {
+            $si = $this->table->interfaceByCode($objT);
+            if ($si !== null && $si->isSubinterfaceOf($iface)) {
+                return true; // 子接口的实现类必然实现该接口
+            }
+            return null;
+        }
+        return null;
     }
 
     private function checkIndex(IndexExpr $e): int
@@ -1343,6 +1427,10 @@ trait CheckExprTrait
             $this->error("接口 '{$e->class}' 不能实例化", $e->pos);
             return Type::NONE;
         }
+        if (isset($this->table->traits[$e->class])) {
+            $this->error("trait '{$e->class}' 不能实例化（编译期展开为使用类的方法）", $e->pos);
+            return Type::NONE;
+        }
         $class = $this->table->classes[$e->class] ?? null;
         if ($class === null) {
             $this->error("未定义的类 '{$e->class}'", $e->pos);
@@ -1350,6 +1438,10 @@ trait CheckExprTrait
         }
         if ($class->isEnum) {
             $this->error("枚举 '{$e->class}' 不能实例化（case 是唯一的实例）", $e->pos);
+            return Type::NONE;
+        }
+        if ($class->isAbstract) {
+            $this->error("抽象类 '{$e->class}' 不能实例化", $e->pos);
             return Type::NONE;
         }
         $ctor = $class->findMethod('__construct'); // 子类可继承父类构造器
@@ -1448,6 +1540,10 @@ trait CheckExprTrait
         }
         if (!$fn->isStatic && !$fn->isCtor) {
             $this->error("不能用 :: 调用实例方法，请使用 ->{$e->method}()", $e->pos);
+        }
+        if ($fn->isAbstract) {
+            // 抽象方法无实现（PHP 为运行时错误，这里编译期拦截）
+            $this->error("不能调用抽象方法 {$fn->ownerClass->name}::{$e->method}()（无实现）", $e->pos);
         }
         if (!$this->canAccess($fn->ownerClass, $fn->vis)) {
             $this->error("无法访问 {$fn->ownerClass->name} 的 {$fn->vis} 方法 {$e->method}()", $e->pos);

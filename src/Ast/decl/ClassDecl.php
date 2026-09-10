@@ -17,5 +17,9 @@ final class ClassDecl extends Node
         public readonly array $methods,
         public readonly array $classConsts = [],
         public readonly array $implements = [],
+        public readonly bool $isFinal = false,
+        public readonly bool $isAbstract = false,
+        /** @var list<UseTraitDecl> */
+        public readonly array $useTraits = [],
     ) {}
 }

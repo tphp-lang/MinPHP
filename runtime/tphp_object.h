@@ -27,6 +27,55 @@ typedef struct {
     void (*dtor)(void *);
 } TphpObjHead;
 
+/*
+ * vtable 头部：类型元信息（instanceof 判定用）。每个类的 vtable 结构首个字段，
+ * 方法指针随其后——所有 vtable 同前缀，父类指针转型后方法偏移依然一致。
+ *
+ * chain  ：祖先类 id 链（自身 → 父 → 祖父 …，-1 结尾）
+ * ifaces ：实现的全部接口 id（含经父类/接口继承的闭包，-1 结尾）
+ *
+ * 判定与 PHP 同构（zend_operators.c: instanceof_function_slow 的父链遍历与
+ * 接口数组线性查），仅指针/整数比较，无哈希与反射。
+ */
+typedef struct {
+    const int32_t *chain;
+    const int32_t *ifaces;
+} TphpVTHead;
+
+static bool tphp_instanceof_class(void *obj, int32_t class_id)
+{
+    if (!obj) {
+        return false; // null instanceof X = false（PHP 语义）
+    }
+    const TphpVTHead *h = (const TphpVTHead *)((TphpObjHead *)obj)->vt;
+    if (!h || !h->chain) {
+        return false;
+    }
+    for (int32_t i = 0; h->chain[i] >= 0; i++) {
+        if (h->chain[i] == class_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tphp_instanceof_iface(void *obj, int32_t iface_id)
+{
+    if (!obj) {
+        return false;
+    }
+    const TphpVTHead *h = (const TphpVTHead *)((TphpObjHead *)obj)->vt;
+    if (!h || !h->ifaces) {
+        return false;
+    }
+    for (int32_t i = 0; h->ifaces[i] >= 0; i++) {
+        if (h->ifaces[i] == iface_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void *tphp_object_alloc(size_t size, void *vt, void (*dtor)(void *))
 {
     TphpObjHead *o = (TphpObjHead *)calloc(1, size);

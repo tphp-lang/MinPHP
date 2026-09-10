@@ -16,6 +16,7 @@ use Tphp\Ast\expr\CastExpr;
 use Tphp\Ast\expr\ClosureExpr;
 use Tphp\Ast\expr\FloatLit;
 use Tphp\Ast\expr\IndexExpr;
+use Tphp\Ast\expr\InstanceOfExpr;
 use Tphp\Ast\expr\IntLit;
 use Tphp\Ast\expr\InterpStr;
 use Tphp\Ast\expr\InvokeExpr;
@@ -90,6 +91,9 @@ trait GenExprTrait
         }
         if ($e instanceof IndexExpr) {
             return $this->genIndex($e);
+        }
+        if ($e instanceof InstanceOfExpr) {
+            return $this->genInstanceOf($e);
         }
         if ($e instanceof BinaryExpr) {
             return $this->genBinary($e);
@@ -354,6 +358,31 @@ trait GenExprTrait
         return implode("\n", $lines);
     }
 
+    /** instanceof：编译期折叠直出常量；否则判定 vtable 类型头（类沿祖先链、接口查 id 集）。 */
+    private function genInstanceOf(InstanceOfExpr $e): string
+    {
+        if ($e->folded === true) {
+            return 'true';
+        }
+        if ($e->folded === false) {
+            return 'false';
+        }
+        $obj = $this->isFreshProducer($e->obj) && $this->isHeapType($e->obj->type)
+            ? $this->rcHoist($e->obj)
+            : $this->genExpr($e->obj);
+        // 接口值是 TphpIface 胖指针：取 obj 字段（null 接口 → NULL → false）
+        $ptr = $this->table->isInterface($e->obj->type) ? '(' . $obj . ').obj' : $obj;
+        $iface = $this->table->ifaces[$e->class] ?? null;
+        if ($iface !== null) {
+            return 'tphp_instanceof_iface((void *)(' . $ptr . '), ' . $iface->code . ')';
+        }
+        $cls = $this->table->classes[$e->class] ?? null;
+        if ($cls === null) {
+            return 'false'; // Checker 已报错（<error> 兜底）
+        }
+        return 'tphp_instanceof_class((void *)(' . $ptr . '), ' . $cls->code . ')';
+    }
+
     private function genBinary(BinaryExpr $e): string
     {
         $op = $e->op;
@@ -458,6 +487,16 @@ trait GenExprTrait
      */
     private function wrapFailable(string $callText, int $retType): string
     {
+        if ($this->inOrContext) {
+            // or 上下文：不传播（不 return），改为"已有挂起错误则跳过本次调用"。
+            // 这样链式 `$a->b()->c()` 中 b() 失败后不会继续对零值调用 c()，
+            // 整个表达式以零值收尾，由外层 or 块统一处理（见 genOrExpr）。
+            if ($this->table->isVoid($retType)) {
+                return '({ if (!tphp_err_has()) { ' . $callText . '; } })';
+            }
+            return '({ ' . $this->cType($retType) . ' __ov = ' . $this->zeroValue($retType)
+                . '; if (!tphp_err_has()) { __ov = ' . $callText . '; } __ov; })';
+        }
         if ($this->table->isVoid($retType)) {
             return '({ ' . $callText . '; if (tphp_err_has()) { ' . $this->propagateReturn() . ' } })';
         }
@@ -470,14 +509,23 @@ trait GenExprTrait
     {
         $ret = $e->type;
         $valueNeeded = !$this->table->isVoid($ret);
-        // 注意：这里的调用不能带传播包装（genExpr 会加），否则错误会跳过 or 块
-        $callText = $e->call instanceof CallExpr ? $this->genCall($e->call) : $this->genExpr($e->call);
+        // 在 or 上下文中生成调用：此时不做错误传播，链中任一环失败都会短路
+        // （wrapFailable / emitNullCheck 依据 inOrContext 切换行为）
+        $savedOrCtx = $this->inOrContext;
+        $this->inOrContext = true;
+        $callText = $this->genExpr($e->call);
+        $this->inOrContext = $savedOrCtx;
 
         // 生成块体：err 绑定 + 语句 + （值上下文）最后表达式赋给 __r
         $savedBuf = $this->sections[$this->cur];
         $savedIndent = $this->indent;
         $this->sections[$this->cur] = '';
         $this->indent = 2;
+        // or 块独立 RC 作用域 + 独立 hoist 释放表：块内临时值（如链式接收者）
+        // 必须在**块内**释放，否则释放语句会落到块外，引用块内声明的变量（C 作用域错误）
+        $this->rcScopeBegin('orblock');
+        $savedReleases = $this->rcStmtReleases;
+        $this->rcStmtReleases = [];
         $this->w('const String err = tphp_err_take();');
         $stmts = $e->block;
         $last = $stmts !== [] ? $stmts[count($stmts) - 1] : null;
@@ -488,9 +536,15 @@ trait GenExprTrait
                 $this->genStmt($stmt);
             }
         }
+        // 先释放块内 hoist 临时，再收块内局部变量（两者都在块缓冲区内生成）
+        foreach (array_reverse($this->rcStmtReleases) as [$rName, $rType]) {
+            $this->rcUnrefStmt($rName, $rType);
+        }
+        $this->rcScopeEnd();
         $blockText = $this->sections[$this->cur];
         $this->sections[$this->cur] = $savedBuf;
         $this->indent = $savedIndent;
+        $this->rcStmtReleases = $savedReleases;
 
         $lines = ['({'];
         if ($valueNeeded) {
@@ -1093,7 +1147,12 @@ trait GenExprTrait
     {
         if ($base instanceof VarExpr || $base instanceof ThisExpr
             || $base instanceof PropFetch || $base instanceof MethodCall) {
-            $this->w('if (!(' . $baseText . ')) ' . $this->panicCall('对 null 对象访问成员') . ';');
+            // or 上下文：链中间调用失败会使接收者为零值（NULL），此时不应 panic，
+            // 而应让整个表达式短路、交由外层 or 块处理
+            $cond = $this->inOrContext
+                ? '!tphp_err_has() && !(' . $baseText . ')'
+                : '!(' . $baseText . ')';
+            $this->w('if (' . $cond . ') ' . $this->panicCall('对 null 对象访问成员') . ';');
         }
     }
 
@@ -1132,7 +1191,8 @@ trait GenExprTrait
 
         if ($this->isLeaf($recv)) {
             // 无子类：直接调用
-            return $this->wrapFailable(Names::method($owner->name, $e->name) . '(' . $args . ')', $e->type);
+            $call = Names::method($owner->name, $e->name) . '(' . $args . ')';
+            return $this->wrapFailable($call, $e->type);
         }
         // 经 vtable 分发
         $call = 'TPHP_VT(' . $objText . ', ' . Names::vtableType($recv->name) . ')->'

@@ -32,6 +32,9 @@ final class Table
     /** @var array<string, InterfaceSymbol> 接口名 → 符号 */
     public array $ifaces = [];
 
+    /** @var array<string, ClassSymbol> trait 名 → 符号（isTrait 标记；不生成结构体） */
+    public array $traits = [];
+
     /** @var array<string, CStructSymbol> #struct 名 → 符号 */
     public array $cstructs = [];
 

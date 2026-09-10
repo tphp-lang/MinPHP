@@ -37,5 +37,16 @@ final class FnSymbol
         public bool $isDtor = false, // __destruct 用户析构（对象引用归零时先于字段释放调用）
         public bool $needsDepthGuard = true, // 在调用环上（或未分析）→ 插深度保护；Checker 环检测后收敛
         public bool $forceDepthGuard = false, // 经闭包/C 回调等不可静态分析的调用 → 强制保护
+        public bool $isAbstract = false, // 抽象方法：无函数体，子类必须实现
+        public bool $isFinal = false, // final 方法：不可被子类重写
     ) {}
+
+    /** 方法体（AST 语句表）。trait 展开时从 trait 的方法复制到使用类的方法符号。 */
+    public ?array $body = null;
+
+    /** 注册顺序（决定方法体检查与函数生成顺序）。 */
+    public int $ordinal = 0;
+
+    /** 来源 trait 名（FQ）；null = 类自身声明。用于 trait 展开的优先级与冲突判定。 */
+    public ?string $fromTrait = null;
 }

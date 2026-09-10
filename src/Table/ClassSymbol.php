@@ -35,6 +35,18 @@ final class ClassSymbol
     /** 枚举 backing 类型码（I_INT / I_STRING）或 null（纯枚举） */
     public ?int $enumBacking = null;
 
+    /** final 类：不可被继承 */
+    public bool $isFinal = false;
+
+    /** abstract 类：不可实例化，可含抽象方法 */
+    public bool $isAbstract = false;
+
+    /** trait 符号：参与 use 展开，不生成结构体/new/vtable，不可实例化与实例判定 */
+    public bool $isTrait = false;
+
+    /** trait 嵌套 use 展开防重入标记 */
+    public bool $traitsExpanded = false;
+
     /** @var list<array{name: string, value: ?\Tphp\Ast\Expr}> 枚举 case */
     public array $enumCases = [];
 

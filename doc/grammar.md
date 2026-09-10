@@ -31,7 +31,11 @@ useDecl     = "use", [ "function" | "const" ], qualifiedName, [ "as", IDENT ], "
             | "use", [ "function" | "const" ], qualifiedName, "\\",
               "{", useItem, { ",", useItem }, [ "," ], "}", ";" ;
 useItem     = [ "function" | "const" ], qualifiedName, [ "as", IDENT ] ;
-toplevel    = funcdecl | classdecl | interdecl | constdecl ;
+toplevel    = funcdecl | classdecl | interdecl | constdecl | traitdecl ;
+traitdecl   = "trait", IDENT, "{", { member | usetrait }, "}" ;
+usetrait    = "use", qualifiedName, { ",", qualifiedName },
+              [ "{", { ( qualifiedName, "::", IDENT, "insteadof", qualifiedName
+                       | qualifiedName, "::", IDENT, "as", [vis], [IDENT] ), ";" }, "}" ] ;
 
 constdecl   = "const", [ type ], IDENT, "=", literal, ";" ;
 interdecl   = "interface", IDENT, [ "extends", IDENT, { ",", IDENT } ],
@@ -39,11 +43,11 @@ interdecl   = "interface", IDENT, [ "extends", IDENT, { ",", IDENT } ],
 imethod     = [ "public" ], "function", IDENT, "(", [params], ")", [":", type], ";" ;
 
 funcdecl    = "function", ident, "(", [params], ")", [":", type], block ;
-classdecl   = "class", ident, [ "extends", ident ],
+classdecl   = [ "final" | "abstract" ], "class", ident, [ "extends", ident ],
               [ "implements", IDENT, { ",", IDENT } ], "{", { member }, "}" ;
-member      = [vis], ["static"], ( method | prop | classconst ) ;
+member      = {vis|"static"|"abstract"|"final"}, ( method | prop | classconst ) ;
 vis         = "public" | "private" | "protected" ;
-method      = "function", ident, "(", [params], ")", [":", type], block ;
+method      = "function", ident, "(", [params], ")", [":", type], ( block | ";" ) ;  (* abstract → ";" *)
 prop        = type, var, ["=", literal], ";" ;
 classconst  = "const", type, IDENT, "=", literal, ";" ;   (* 类型必填 *)
 params      = param, { ",", param } ;
@@ -91,7 +95,8 @@ equality    = rel, { ("==" | "!="), rel } ;
 rel         = shift, { ("<" | ">" | "<=" | ">="), shift } ;
 shift       = add, { ("<<" | ">>"), add } ;
 add         = mul, { ("+" | "-" | "."), mul } ;
-mul         = pow, { ("*" | "/" | "%"), pow } ;
+mul         = inst, { ("*" | "/" | "%"), inst } ;
+inst        = unary, { "instanceof", (ident | qualifiedName) } ;  (* 右侧须为类型名 *)
 unary       = ("-" | "+" | "!" | "~" | "++" | "--"), unary | power ;
 power       = postfix, [ "**", unary ] ;             (* 右结合，高于一元负号 *)
 postfix     = primary, { postfixtail } ;
@@ -99,7 +104,8 @@ postfixtail = "[", [expr], "]" | "->", ident, ["(", [args], ")"]
             | var, "(", [args], ")"                    (* 闭包调用 $f(...) *)
             | "c", "->", IDENT, ["(", [args], ")"]   (* phpc 直连 *)
             | "::", ( var | IDENT, ["(", [args], ")"] )   (* ::$prop / ::CONST / ::method() *)
-            | "or", block                                 (* 仅函数调用后 *)
+            | "or", block                                 (* 任意可失败调用后：函数 / 闭包 /
+                                                             方法 / 静态 / 构造器 new C() *)
             | "++" | "--" ;
 primary     = literal | var | "this" | IDENT        (* 常量引用 / self:: 前半 *)
             | "[" [args] "]"
@@ -246,6 +252,22 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
 - `throw <string 表达式>;` 抛出；错误自动沿调用链上浮（各层立即返回零值），
   直到最近的 `调用 or { 块 }`；全程无 or {} 时顶层打印 `Uncaught error: <消息>`，
   退出码 1
+- **可带 `or {}` 的调用形式（全部）**：全局函数 `f()`、变量闭包 `$f()`、
+  方法调用 `$obj->m()`、静态调用 `C::m()`、构造器 `new C()`——
+  即任何可能触达 `throw` 的调用。例：
+  ```php
+  int $r = $d->hello() or { -1; };              // 捕获方法内异常
+  Demo $e = new Demo(-1) or { new Demo(9); };   // 捕获构造器异常（构造失败时对象未建成）
+  int $h = $cb(-1) or { 42; };                  // 捕获闭包内异常
+  ```
+- **or 管住整条链**：链式调用中任一环失败 → 立即短路进 or 块，
+  后续环节**不再求值**（等价于 `try { 整条语句 }`）：
+  ```php
+  int $v = $a->parse()->value() or { -1; }   // parse() 失败时 value() 不会被调用
+  ```
+  实现：or 上下文中调用不做错误传播，改为"已有挂起错误则跳过本次调用"，
+  表达式以零值收尾，由 or 块统一收口；对应的 null 检查也以 `!tphp_err_has()` 为前提
+  （故链中间失败不会因对零值解引用而 panic）
 - or 块：值上下文取块内最后一条表达式语句的值；块内可用 `return` / `break` / `continue`；
   块内语句正常带分号
 - 无任何签名注解——不追踪可失败性，任何调用都可能带 or {}
@@ -261,6 +283,7 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
 | `"a" . 1` | 标量自动转 string 后拼接 |
 | `if ($n)` | 编译错误——条件必须是 bool |
 | `$a == $b` | 编译期已知类型，恒等比较（接口比较 .obj 指针；数组不支持 `==`） |
+| `$x instanceof C` | 类沿祖先链、接口查 id 集（判定与 PHP 同构）；静态类型可判定时编译期折叠；右侧不支持动态类名 |
 
 ### 类
 
@@ -270,8 +293,38 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
 - 允许方法重写（签名一致）；**不允许属性遮蔽**
 - 支持 `public / private / protected`（编译期检查）、静态属性与方法、
   `self::` / `parent::`、`__construct`
-- 不支持：trait / abstract / final / enum / 匿名类 /
-  魔术方法（`__construct` 除外）
+- `final class` 不可继承；`final` 方法不可重写（父链检查）
+- `abstract class` 不可实例化；`abstract` 方法以 `;` 结束（无函数体），
+  非抽象子类必须实现全部抽象方法（沿父链判定"最近声明"）；
+  抽象类可含具体方法，抽象方法不得为 private；抽象构造器 / 析构器合法
+  （但不可显式 `parent::` 调用——编译期拦截，PHP 为运行时错误）
+- `final const`（PHP 8.1+）/ `final` 属性（PHP 8.4+）语法可用：本语言常量
+  不可被子类重定义、属性禁止遮蔽，语义天然满足（PHP 侧分别对应
+  `zend_inheritance.c` 的 override final constant / property 检查）；
+  `private final const` 按 PHP 报编译错（对其它类不可见）
+- `final private` 方法警告冗余（对齐 `zend_compile.c:8259`），构造函数豁免
+- **与 PHP 的时机差异**（源码+实测确认）：
+  - 抽象类实例化（PHP `zend_API.c:1831`）与调用抽象方法（PHP `zend_object_handlers.c:1934`）
+    在 PHP 是**运行时 Error（`try/catch` 可捕获）**，本语言在**编译期**拒绝——AOT 下更早发现
+  - 其余检查（继承 final 类/重写 final 方法、抽象方法 private/有体、含抽象方法未标
+    abstract、非抽象子类未实现抽象方法）PHP 均为编译期错误（`E_COMPILE_ERROR`），
+    本语言一致
+- `instanceof`：类/子类/接口判定（元信息挂在 vtable 头部：祖先 id 链 + 接口 id 集）；
+  静态类型足以判定时编译期折叠为常量；左侧须为对象类型；右侧不支持动态类名
+- 不支持：匿名类 / 魔术方法（`__construct` / `__destruct` 除外）
+
+### trait
+
+PHP 语义同构的**编译期展开**（对齐 `zend_inheritance.c` 的 `zend_traits_copy_functions`）：
+trait 的方法/属性/常量在使用类处**单态化复制**（C 符号属使用类），**零运行时痕迹**。
+
+- `use A, B;`（可多个）与嵌套 `use`（trait 用 trait）
+- **类自身成员优先**于 trait 成员（PHP：`members from the current class override trait methods`）
+- 两个 trait 的同名非抽象方法冲突 → 编译错误；用 `A::m insteadof B;` 选择实现、
+  `B::m as bm;` 取别名（或 `as private` 改可见性）解决；抽象方法不冲突
+- trait 可含抽象方法（使用类必须实现，规则同抽象类）；`self::` 指使用类
+- trait 不可实例化、不可继承、不可用于 `instanceof`（PHP 实测恒 false，本语言编译期报错）
+- 循环 use 静默截断（防挂死；PHP 报错）
 
 ### 数组
 

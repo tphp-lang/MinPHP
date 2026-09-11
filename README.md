@@ -55,10 +55,11 @@ Uncaught error: not ready
 php main.php run examples/01_hello.php       # 编译并运行（exe 在当前目录，C 源码在 build/）
 php main.php build examples/04_class.php     # 只编译出 04_class.exe（当前目录）
 php main.php build examples/02_control.php --emit-c   # 只生成 C 源码（build/ 目录，可直接阅读）
-php tests/run.php                            # 跑测试（64 个用例，含多文件/内存/推断/phpc/可见性/闭包/heredoc/枚举/析构/指令安全/平台条件/map/trait/abstract/instanceof/运行时 panic）
+php tests/run.php                            # 跑测试（65 个用例，含多文件/内存/推断/phpc/可见性/闭包/heredoc/枚举/析构/指令安全/平台条件/map/trait/abstract/instanceof/运行时 panic/返回路径内存安全）
 php tests/shared.php                         # 库模式测试（shared 命令 + #[export] 符号导出）
 php tests/dot.php                            # `.` 指令测试（递归展开 + 排除规则）
 php tests/cross.php                          # 交叉编译测试（4 个目标）
+php tests/packages.php                       # 包管理测试（#import 装配/传递依赖/环依赖/C 能力/#php 门槛）
 ```
 
 产物位置：可执行文件/动态库默认输出到当前目录，C 源码默认输出到当前目录的
@@ -202,6 +203,10 @@ class Main
   见 `doc/phpc.md`）+ `c->` 直连调用与常量引用；
   `c_fn($closure)` 闭包 → C 回调函数指针（约定 C 回调尾参 `void* userdata`，trampoline 转发）；
   C 内存自动管理（`cbuf`/`c_own` 登记，函数出口自动 free，开发者不写 free）——详见 `doc/phpc.md`
+- **包与能力来源**：`#import <包名>` 引入自研标准库包（`ext/<包名>/`，项目 ext 优先、
+  兼容分层名如 `tphp/json`；包内 `.php` 递归并入编译单元，传递依赖自动装配、环依赖报错）；
+  包可用 `mod.php` 清单显式声明 C 能力（`#include`/`#flag`，相对路径按包根解析），
+  编译时打印能力汇总；`#php <模块名>` 开启 PHP 原生能力（全局名调用，需 `php/` 下的 libphp）——详见 `doc/package.md`
 - **入口**：`class Main` + `main(): void`
 
 明确不做：动态类型、引用传参、魔术方法（`__construct`/`__destruct` 除外）、

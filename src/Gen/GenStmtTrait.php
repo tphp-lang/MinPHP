@@ -276,11 +276,13 @@ trait GenStmtTrait
             // 返回 $this（: self 链式）：借用 incref——调用方持有自己的引用
             $this->rcRefStmt($text, $s->expr->type);
         }
+        // 顺序很关键：**先求值返回表达式**，再做本帧清理。
+        // 返回表达式可能"读"局部堆变量（如 return implode("", $parts)），
+        // 若先 rcCleanupReturn() 会释放它 → 读到已释放内存（段错误）。
+        // 顺带：递归调用发生在求值处，本帧深度必须仍在计数，故 leave 也放在求值之后。
+        $this->w($this->cType($this->curRet) . ' __rv = ' . $text . ';');
         $this->rcCleanupReturn();
         $this->w('tphp_cmem_free_since(__cmem);');
-        // 先把返回表达式求值入临时（递归调用发生在此，本帧深度必须仍在计数），
-        // 之后再 leave——leave 若先于表达式求值，深度会先减后加，永远到不了上限。
-        $this->w($this->cType($this->curRet) . ' __rv = ' . $text . ';');
         $this->condDepthLeave();
         $this->w('return __rv;');
         $this->lastReturned = true;

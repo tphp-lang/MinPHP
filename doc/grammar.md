@@ -9,7 +9,7 @@ int 整除、严格 bool 条件），表面语法保持 PHP 风格（`$` 变量�
 - `<?php` 开标签任意文件可选；`?>` 表示源码结束（其后内容忽略）
 - 注释：`// ...`、`# ...`、`/* ... */`
 - 行首 `#[export("C名")]` 注解：整体为一个 token，仅全局函数（见 doc/phpc.md）；
-  行首其余 `#` 为 phpc 指令（`#include` / `#flag` / `#struct` / `#if`）或行注释
+  行首其余 `#` 为指令（`#include` / `#flag` / `#struct` / `#if` / `#import` / `#php`）或行注释
 - 标识符：`[A-Za-z_][A-Za-z0-9_]*`；变量：`$` + 标识符
 - 数字：十进制 / `0x` 十六进制 / `0b` 二进制 / `0o` 八进制；浮点含小数与指数部分
 - 字符串：单引号（仅 `\\` `\'` 转义）与双引号（`\n \r \t \v \f \0 \\ \$ \"` +
@@ -24,6 +24,8 @@ int 整除、严格 bool 条件），表面语法保持 PHP 风格（`$` 变量�
 program     = [ "<?php" ], [ nsdecl ] , { directive | useDecl | toplevel } ;
 directive   = "#include", ("<", path, ">" | "\"", path, "\"") 
             | "#flag", { arg } 
+            | "#import", pkgName          (* 自研 ext 包：ext/<pkgName>/，见 doc/package.md *)
+            | "#php", IDENT               (* PHP 原生能力（需 libphp） *)
             | "#struct", IDENT, "{", { type, IDENT, ";" }, "}"
             | "#if", cond, { directive | toplevel }, { "#elif", cond, ... }, ["#else", ...], "#endif" ;
 nsdecl      = "namespace", qualifiedName, ";" ;
@@ -359,7 +361,9 @@ trait 的方法/属性/常量在使用类处**单态化复制**（C 符号属使
 
 ### phpc（C 互操作）
 
-- 行首 `#include` / `#flag` / `#struct` / `#if` 为指令；其余 `#` 为行注释
+- 行首 `#include` / `#flag` / `#struct` / `#if` / `#import` / `#php` 为指令；其余 `#` 为行注释
+- `#import <包名>`：引入自研标准库包（`ext/<包名>/`，可分层如 `tphp/json`）；
+  `#php <模块名>`：开启 PHP 原生能力（需 `php/` 下的 libphp）。详见 `doc/package.md`
 - `#if` / `#elif` / `#else` / `#endif` 平台条件编译：条件为 os / arch / cc 名（可 `!` 取反），
   非命中分支解析前整段丢弃；支持嵌套与函数体内使用
 - `c->符号(...)` 直连调用；`c->宏` 常量引用；返回 CVAL（信任程序员，

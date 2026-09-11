@@ -20,6 +20,9 @@ use Tphp\Table\Table;
  */
 final class Builder
 {
+    /** @var list<string> 已展开的包根绝对路径（#flag 相对路径按包根解析） */
+    private array $packageDirs = [];
+
     public function __construct(private readonly Pref $pref) {}
 
     public function run(): int
@@ -55,16 +58,32 @@ final class Builder
         $table = new Table();
         $parser = new Parser($errors);
 
+        // 包展开（#import）：把包内源文件并入编译单元（辅助文件，排在入口之前）
+        $resolver = new PackageResolver($errors, (string)getcwd(), dirname(__DIR__, 2));
+        $extFiles = $this->expandPackages($resolver, $sources, $this->pref->inputs);
+        if ($errors->hasErrors()) {
+            return $this->report($errors);
+        }
+
+        // 解析顺序：CLI 辅助文件 → 包文件 → 入口（含 class Main）最后
         $ordered = array_keys($sources);
         if ($entryIndex !== null) {
             $ordered = array_diff($ordered, [$entryIndex]);
-            $ordered[] = $entryIndex; // 入口最后解析
+        }
+        $plan = [];
+        foreach ($ordered as $idx) {
+            $plan[] = [str_replace('\\', '/', $this->pref->inputs[$idx]), $sources[$idx]];
+        }
+        foreach ($extFiles as $extFile) {
+            $plan[] = [$extFile['path'], $extFile['src']];
+        }
+        if ($entryIndex !== null) {
+            $plan[] = [str_replace('\\', '/', $this->pref->inputs[$entryIndex]), $sources[$entryIndex]];
         }
 
         $files = [];
-        foreach ($ordered as $idx) {
-            $input = $this->pref->inputs[$idx];
-            $files[] = $parser->parseFile(str_replace('\\', '/', $input), $sources[$idx], [
+        foreach ($plan as [$path, $src]) {
+            $files[] = $parser->parseFile($path, $src, [
                 'os' => $this->pref->os,
                 'arch' => $this->pref->arch,
                 'cc' => $this->pref->cc,
@@ -73,6 +92,18 @@ final class Builder
         if ($errors->hasErrors()) {
             return $this->report($errors);
         }
+
+        // 包根目录（#flag 相对路径按包根解析；能力汇总用）
+        $this->packageDirs = array_values($resolver->roots());
+
+        // #php：M1 只做能力检测与提示（真链接见 M2 / doc/package.md）
+        $phpModules = $this->collectPhpModules($files);
+        $missing = $this->checkLibphp($phpModules);
+        if ($missing !== null) {
+            fwrite(STDERR, $missing);
+            return 1;
+        }
+        $this->reportCapabilities($files, $resolver->roots(), $phpModules);
 
         $entryPath = $entryIndex !== null ? str_replace('\\', '/', $this->pref->inputs[$entryIndex]) : str_replace('\\', '/', $this->pref->inputs[0]);
         (new Checker($table, $errors))->check($files, $entryPath, $this->pref->noMain);
@@ -131,36 +162,218 @@ final class Builder
         return 0;
     }
 
+    /**
+     * 展开全部 `#import`（含传递依赖），返回包内待编译文件。
+     *
+     * @param array<int, string> $sources CLI 输入源文本（idx => src）
+     * @param list<string> $inputs CLI 输入路径
+     * @return list<array{path: string, src: string}>
+     */
+    private function expandPackages(PackageResolver $resolver, array $sources, array $inputs): array
+    {
+        $out = [];
+        $queue = [];
+        foreach ($sources as $idx => $src) {
+            foreach ($resolver->scanImportsIn($src) as [$name, $line]) {
+                $queue[] = [$name, str_replace('\\', '/', $inputs[$idx]), $line];
+            }
+        }
+        while ($queue !== []) {
+            [$name, $origin, $line] = array_shift($queue);
+            if ($resolver->isExpanded($name)) {
+                continue;
+            }
+            foreach ($resolver->expand($name, $origin, $line) as $file) {
+                $out[] = $file;
+                // 传递依赖兜底（expand 内部已递归；此处防止轻量扫描遗漏）
+                foreach ($resolver->scanImportsIn($file['src']) as [$child, $childLine]) {
+                    if (!$resolver->isExpanded($child)) {
+                        $queue[] = [$child, $file['path'], $childLine];
+                    }
+                }
+            }
+        }
+        return $out;
+    }
+
     /** 收集全部文件的 #flag 参数。 @return list<string> */
     private function collectCFlags(array $files): array
     {
         $flags = [];
         foreach ($files as $file) {
+            $base = $this->packageBaseOf($file->path);
             foreach ($file->cflags as $flag) {
-                $flags[] = $flag;
+                $flags[] = $base === null ? $flag : $this->rebaseFlag($flag, $base);
             }
         }
         return $flags;
     }
 
-    /** 收集 #flag 中引用的 .c 源文件（加入编译列表）。 @return list<string> */
+    /**
+     * 收集 #flag 中引用的 .c 源文件（加入编译列表）。
+     * 包内文件的相对路径**相对包根**解析；项目内其它文件保持既有 CWD 语义。
+     *
+     * @return list<string>
+     */
     private function collectFlagSources(array $files): array
     {
         $sources = [];
         foreach ($files as $file) {
+            $base = $this->packageBaseOf($file->path);
             foreach ($file->cflags as $flag) {
                 foreach (preg_split('/\s+/', trim($flag)) ?: [] as $token) {
-                    if (str_ends_with($token, '.c')) {
-                        if (!is_file($token)) {
-                            fwrite(STDERR, "TinyPHP: {$file->path}: #flag 引用的源文件不存在 {$token}\n");
-                            exit(1);
-                        }
-                        $sources[] = $token;
+                    if (!str_ends_with($token, '.c')) {
+                        continue;
                     }
+                    $path = $base === null ? $token : $base . '/' . ltrim(str_replace('\\', '/', $token), '/');
+                    if (!is_file($path)) {
+                        fwrite(STDERR, "TinyPHP: {$file->path}: #flag 引用的源文件不存在 {$token}"
+                            . ($base !== null ? "（按包根解析为 {$path}）" : '') . "\n");
+                        exit(1);
+                    }
+                    $sources[] = $path;
                 }
             }
         }
         return $sources;
+    }
+
+    /** 文件所属包根（不在任何包内返回 null）。 */
+    private function packageBaseOf(string $filePath): ?string
+    {
+        $path = str_replace('\\', '/', $filePath);
+        foreach ($this->packageDirs as $dir) {
+            if (str_starts_with($path, $dir . '/')) {
+                return $dir;
+            }
+        }
+        return null;
+    }
+
+    /** 把 #flag 行内的相对路径改写成相对包根（-I/-L/裸 .c .h .o .a）。 */
+    private function rebaseFlag(string $flag, string $base): string
+    {
+        $out = [];
+        foreach (preg_split('/\s+/', trim($flag)) ?: [] as $tok) {
+            if ($tok === '') {
+                continue;
+            }
+            $out[] = match (true) {
+                str_starts_with($tok, '-I') && strlen($tok) > 2 => '-I' . $this->rebasePath(substr($tok, 2), $base),
+                str_starts_with($tok, '-L') && strlen($tok) > 2 => '-L' . $this->rebasePath(substr($tok, 2), $base),
+                preg_match('/\.(c|h|o|a)$/', $tok) === 1 => $this->rebasePath($tok, $base),
+                default => $tok,
+            };
+        }
+        return implode(' ', $out);
+    }
+
+    /** 相对路径 → 相对包根（绝对路径原样返回；去引号后按需补回）。 */
+    private function rebasePath(string $p, string $base): string
+    {
+        $quoted = strlen($p) >= 2 && $p[0] === '"' && str_ends_with($p, '"');
+        $raw = $quoted ? substr($p, 1, -1) : $p;
+        $norm = str_replace('\\', '/', $raw);
+        if ($norm !== '' && !str_starts_with($norm, '/') && preg_match('/^[A-Za-z]:/', $norm) !== 1) {
+            $norm = $base . '/' . $norm;
+        }
+        return $quoted ? '"' . $norm . '"' : $norm;
+    }
+
+    /** 汇总全部文件声明的 #php 模块。 @return list<string> */
+    private function collectPhpModules(array $files): array
+    {
+        $mods = [];
+        foreach ($files as $file) {
+            foreach ($file->phpModules as $m) {
+                $mods[$m] = true;
+            }
+        }
+        return array_keys($mods);
+    }
+
+    /**
+     * #php 就绪检测：需要 libphp 的头与链接库（放在项目 php/ 目录）。
+     * 返回 null = 就绪；否则返回错误文案（M2 实现链接前，未就绪即显式报错）。
+     *
+     * @param list<string> $phpModules
+     */
+    private function checkLibphp(array $phpModules): ?string
+    {
+        if ($phpModules === []) {
+            return null;
+        }
+        $root = (string)getcwd() . '/php';
+        $dir = is_dir($root) ? $root : dirname(__DIR__, 2) . '/php';
+        $header = $dir . '/include/php_embed.h';
+        $libs = [$dir . '/php8embed.lib', $dir . '/dev/php8.lib'];
+        $missing = [];
+        if (!is_file($header)) {
+            $missing[] = 'php/include/php_embed.h（PHP 嵌入头；需与 php8.dll 同版本同 ABI）';
+        }
+        $libOk = false;
+        foreach ($libs as $lib) {
+            if (is_file($lib)) {
+                $libOk = true;
+                break;
+            }
+        }
+        if (!$libOk) {
+            $missing[] = 'php/php8embed.lib 或 php/dev/php8.lib（链接库）';
+        }
+        if ($missing === []) {
+            return null;
+        }
+        return "TinyPHP: #php " . implode(' ', $phpModules) . " 需要 libphp，但 php/ 目录未就绪：\n"
+            . '  缺失：' . implode("\n         ", $missing) . "\n"
+            . "  位置：" . str_replace('\\', '/', $dir) . "\n"
+            . "  详见 doc/package.md；未使用 #php 的程序不受影响。\n";
+    }
+
+    /**
+     * 编译期能力汇总（供应链透明）：包 → C 能力；#php → libphp 依赖。
+     *
+     * @param array<string, string> $roots 包名 → 包根
+     * @param list<string> $phpModules
+     */
+    private function reportCapabilities(array $files, array $roots, array $phpModules): void
+    {
+        if ($roots === [] && $phpModules === []) {
+            return;
+        }
+        echo "[TinyPHP 能力汇总]\n";
+        foreach ($roots as $name => $dir) {
+            $flags = [];
+            $srcs = [];
+            foreach ($files as $file) {
+                if (!str_starts_with(str_replace('\\', '/', $file->path), $dir . '/')) {
+                    continue;
+                }
+                foreach ($file->cflags as $flag) {
+                    foreach (preg_split('/\s+/', trim($flag)) ?: [] as $tok) {
+                        if ($tok === '') {
+                            continue;
+                        }
+                        if (str_ends_with($tok, '.c')) {
+                            $srcs[$tok] = true;
+                        } else {
+                            $flags[$tok] = true;
+                        }
+                    }
+                }
+            }
+            $detail = [];
+            if ($flags !== []) {
+                $detail[] = 'cflags: ' . implode(' ', array_keys($flags));
+            }
+            if ($srcs !== []) {
+                $detail[] = '附加C源: ' . implode(' ', array_keys($srcs));
+            }
+            printf("  #import %-18s %s\n", $name, $detail === [] ? '（纯自研实现，无 C 能力）' : implode('  ', $detail));
+        }
+        foreach ($phpModules as $mod) {
+            printf("  #php %-22s 链接 libphp（php/），产物将不再是零依赖\n", $mod);
+        }
     }
 
     /** run 命令仅对本机目标可用。 */

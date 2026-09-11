@@ -166,14 +166,15 @@ final class Pref
 
     /**
      * 递归收集目录下全部 *.php（`.` 指令）。
-     * 跳过 vendor / build / .git 与任何以 `.` 开头的目录（隐藏），按路径排序保证稳定顺序。
+     * 跳过 vendor / build / ext / .git 与任何以 `.` 开头的目录（隐藏），按路径排序保证稳定顺序。
+     * （ext/ 是包目录：只由 `#import` 拉取，避免与目录扫描重复收集。）
      *
      * @return list<string>
      */
     private static function phpFilesRecursive(string $dir): array
     {
         $out = [];
-        $skipDirs = ['vendor', 'build', '.git'];
+        $skipDirs = ['vendor', 'build', 'ext', '.git'];
         $it = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::LEAVES_ONLY

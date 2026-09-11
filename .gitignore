@@ -26,3 +26,9 @@ composer.lock
 # 基准产物（.bench/ 只入库 php 源码）
 .bench/*.c
 .bench/*.exe
+
+# PHP 发行版（#php 用；65MB，不入库）
+/php
+
+# 包管理测试的临时工程
+build/

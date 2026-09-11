@@ -44,6 +44,20 @@ trait ParserDeclTrait
                 $this->fileCflags[] = $lit;
                 continue;
             }
+            if ($this->is(TokenKind::DirImport)) {
+                $lit = $this->next()->lit;
+                if ($this->validateImport($lit)) {
+                    $this->fileImports[] = $lit;
+                }
+                continue;
+            }
+            if ($this->is(TokenKind::DirPhp)) {
+                $lit = $this->next()->lit;
+                if ($this->validatePhpModule($lit)) {
+                    $this->filePhpModules[] = $lit;
+                }
+                continue;
+            }
             if ($this->is(TokenKind::DirStruct)) {
                 $declared = true;
                 $decls[] = $this->parseCStructRest();
@@ -130,6 +144,40 @@ trait ParserDeclTrait
     }
 
     // ------------------------------------------------------------------ phpc 指令安全校验
+    /**
+     * #import 校验：只接受**包名**（形如 `json` / `tphp/json`），对应 `ext/<包名>/`。
+     * 不接受路径形式（含 `.`/`..`/盘符/反斜杠）——包只能从 ext 目录取，防止越界；
+     * 与 #include/#flag 同样"不可触达项目外文件"的安全原则一致。
+     */
+    private function validateImport(string $name): bool
+    {
+        if ($name === '') {
+            $this->errHere('#import 缺少包名（形如 #import tphp/json，对应 ext/tphp/json）');
+            return false;
+        }
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)*$/', $name) !== 1) {
+            $this->errHere(
+                "#import 只接受包名（字母/数字/下划线，可用 / 分层，如 tphp/json），不支持路径形式；得到 \"{$name}\"",
+            );
+            return false;
+        }
+        return true;
+    }
+
+    /** #php 校验：只接受模块名（如 json / pcre / hash）。 */
+    private function validatePhpModule(string $mod): bool
+    {
+        if ($mod === '') {
+            $this->errHere('#php 缺少模块名（形如 #php json）');
+            return false;
+        }
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $mod) !== 1) {
+            $this->errHere("#php 只接受模块名（字母/数字/下划线，如 json/pcre/hash）；得到 \"{$mod}\"");
+            return false;
+        }
+        return true;
+    }
+
     /**
      * #include 安全校验：`<...>` 系统头放行；`"..."` 相对路径必须停留在项目内。
      * （对齐 vlang：源文件不可通过指令触达构建机上的任意文件。）

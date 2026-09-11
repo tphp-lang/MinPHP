@@ -17,6 +17,8 @@ enum TokenKind
     // phpc 指令（# 行首指令）
     case DirInclude;  // #include <...> / #include "..."（原文含尖括号或引号）
     case DirFlag;     // #flag -l...（行内参数原文）
+    case DirImport;   // #import <包名|.相对路径>（自研标准库扩展）
+    case DirPhp;      // #php <模块名>（PHP 原生能力：函数/标准库/扩展，需 libphp）
     case DirStruct;   // #struct（结构体体走正常 token 流）
     case DirIf;       // #if <条件>（条件原文：os/arch/cc 名，可 ! 取反）
     case DirElif;     // #elif <条件>

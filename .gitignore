@@ -32,3 +32,6 @@ composer.lock
 
 # 包管理测试的临时工程
 build/
+
+# phar 构建产物
+/*.phar

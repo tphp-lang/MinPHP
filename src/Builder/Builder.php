@@ -7,6 +7,7 @@ namespace Tphp\Builder;
 use Tphp\Checker\Checker;
 use Tphp\Errors\Errors;
 use Tphp\Gen\Gen;
+use Tphp\Install\Paths;
 use Tphp\Parser\Parser;
 use Tphp\Pref\Pref;
 use Tphp\Table\Table;
@@ -60,7 +61,7 @@ final class Builder
 
         // 包展开（#import）：把包内源文件并入编译单元（辅助文件，排在入口之前）
         // 包只在**编译器目录**的 ext/ 下查找（与 CWD 无关）
-        $resolver = new PackageResolver($errors, dirname(__DIR__, 2) . '/ext');
+        $resolver = new PackageResolver($errors, Paths::root() . '/ext');
         $extFiles = $this->expandPackages($resolver, $sources, $this->pref->inputs);
         if ($errors->hasErrors()) {
             return $this->report($errors);
@@ -140,7 +141,7 @@ final class Builder
             return 0;
         }
 
-        $exe = Cc::compile($this->pref, $cPath, $exePath, dirname(__DIR__, 2) . '/runtime', $this->collectCFlags($files), $this->collectFlagSources($files));
+        $exe = Cc::compile($this->pref, $cPath, $exePath, Paths::root() . '/runtime', $this->collectCFlags($files), $this->collectFlagSources($files));
         if ($exe === null) {
             return 1;
         }

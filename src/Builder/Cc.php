@@ -4,24 +4,37 @@ declare(strict_types=1);
 
 namespace Tphp\Builder;
 
+use Tphp\Install\Paths;
 use Tphp\Pref\Pref;
 
 /**
  * 调用 C 编译器把生成的 .c 变成产物。
  *
- * 默认用项目自带的 TCC：
- *   - windows x86_64（本机）  → tcc/tcc.exe
- *   - windows i386            → tcc/i386-win32-tcc.exe   （32 位 PE）
- *   - linux x86_64            → tcc/x86_64-tcc.exe       （musl 静态 ELF）
- *   - linux arm64             → tcc/arm64-tcc.exe        （musl 静态 ELF）
- * Linux 交叉产物静态链接 musl，不依赖目标机 libc，可直接放到目标板运行；
- * 也可以 --cc gcc/clang 并用 --cflag 透传交叉参数。
+ * 默认用随包 TCC，按 **host × target** 选择二进制（TCC 的目标平台在编译 tcc 自身时
+ * 由 TCC_TARGET_* 宏决定，交叉编译器是按目标命名的独立二进制，映射见 TCC.md）：
+ *
+ *   | host \ target        | windows x64        | windows i386            | linux x86_64     | linux arm64      |
+ *   |----------------------|--------------------|-------------------------|------------------|------------------|
+ *   | windows              | tcc/tcc.exe        | tcc/i386-win32-tcc.exe  | tcc/x86_64-tcc.exe | tcc/arm64-tcc.exe |
+ *   | linux                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/tcc（仅同构） | tcc/tcc（仅同构） |
+ *   | macOS                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/x86_64-tcc   | tcc/arm64-tcc    |
+ *
+ * Windows/linux 交叉产物静态链接（musl / PE），不依赖目标机 libc；
+ * 也可以 --cc gcc/clang 并用 --cflag 透传交叉参数。找不到随包 TCC 时**显式报错**
+ * （不再静默退回 PATH——发布包必须完整）。
  */
 final class Cc
 {
     public static function compile(Pref $pref, string $cFile, string $exeFile, string $runtimeDir, array $cflags = [], array $extraSources = []): ?string
     {
-        $cmd = self::buildCommand($pref, $cFile, $exeFile, $runtimeDir, $cflags, $extraSources);
+        $tcc = null;
+        if ($pref->cc === 'tcc') {
+            $tcc = self::tccBinary($pref);
+            if ($tcc === null) {
+                return null;
+            }
+        }
+        $cmd = self::buildCommand($pref, $cFile, $exeFile, $runtimeDir, $cflags, $extraSources, $tcc);
         $escaped = implode(' ', array_map('escapeshellarg', $cmd));
         echo "> {$escaped}\n";
 
@@ -56,9 +69,9 @@ final class Cc
     }
 
     /** @return list<string> */
-    private static function buildCommand(Pref $pref, string $cFile, string $exeFile, string $runtimeDir, array $cflags = [], array $extraSources = []): array
+    private static function buildCommand(Pref $pref, string $cFile, string $exeFile, string $runtimeDir, array $cflags = [], array $extraSources = [], ?string $tcc = null): array
     {
-        $cmd = [$pref->cc === 'tcc' ? self::tccBinary($pref) : $pref->cc];
+        $cmd = [$pref->cc === 'tcc' ? ($tcc ?? 'tcc') : $pref->cc];
         $cmd[] = '-o';
         $cmd[] = $exeFile;
         $cmd[] = '-I';
@@ -85,21 +98,40 @@ final class Cc
         return $cmd;
     }
 
-    /** 按目标平台选择自带 TCC 二进制。 */
-    private static function tccBinary(Pref $pref): string
+    /** 按 host × target 选择随包 TCC 二进制；不可用返回 null（已打印错误）。 */
+    private static function tccBinary(Pref $pref): ?string
     {
-        $root = dirname(__DIR__, 2);
+        $dir = Paths::root() . '/tcc';
+        $hostOs = strtolower(PHP_OS_FAMILY); // windows / linux / darwin
+        $hostArch = Pref::normalizeArch(php_uname('m'));
+        $suffix = $hostOs === 'windows' ? '.exe' : '';
+        $target = $pref->os . '/' . $pref->arch;
+
+        if ($pref->os === 'windows') {
+            if ($pref->arch === 'i386') {
+                return $dir . '/i386-win32-tcc' . $suffix;
+            }
+            return $hostOs === 'windows' ? $dir . '/tcc.exe' : $dir . '/x86_64-win32-tcc' . $suffix;
+        }
+
         if ($pref->os === 'linux') {
-            return $pref->arch === 'arm64'
-                ? $root . '/tcc/arm64-tcc.exe'
-                : $root . '/tcc/x86_64-tcc.exe';
+            if ($hostOs === 'linux') {
+                // native TCC 的目标架构在编译期已定，只能产出本机架构
+                if ($hostArch !== $pref->arch) {
+                    return self::noTcc($target, $hostOs . '/' . ($hostArch === '' ? '?' : $hostArch), 'Linux 主机的 native TCC 只能产出本机架构的 ELF');
+                }
+                return $dir . '/tcc';
+            }
+            return $dir . ($pref->arch === 'arm64' ? '/arm64-tcc' . $suffix : '/x86_64-tcc' . $suffix);
         }
-        if ($pref->arch === 'i386') {
-            return $root . '/tcc/i386-win32-tcc.exe';
-        }
-        // 本机目标：找不到内置 tcc 时退回 PATH
-        $exe = PHP_OS_FAMILY === 'Windows' ? 'tcc.exe' : 'tcc';
-        $local = $root . '/tcc/' . $exe;
-        return is_file($local) ? $local : 'tcc';
+
+        return self::noTcc($target, $hostOs, '不支持的目标系统');
+    }
+
+    private static function noTcc(string $target, string $host, string $why): null
+    {
+        fwrite(STDERR, "TinyPHP: 没有可用于 目标 {$target}（host {$host}）的随包 TCC —— {$why}\n");
+        fwrite(STDERR, "TinyPHP: 请确认发布包完整（应含 tcc/ 目录），或用 --cc 指定外部编译器\n");
+        return null;
     }
 }

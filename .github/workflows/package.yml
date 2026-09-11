@@ -1,0 +1,149 @@
+name: Package
+
+# 打包 TinyPHP 编译器（micro.sfx + tphp.phar 拼接为单文件 tphp[.exe]）。
+#
+# 发布包内 runtime/、tcc/、ext/ 以**真文件**分发（不做首跑解压）：
+#   tphp-<target>/
+#     tphp[.exe]     编译器本体（micro.sfx + tphp.phar）
+#     runtime/       C 运行时头文件（tcc -I 需要）
+#     tcc/           对应平台 TCC 包原样解出（含交叉编译器）
+#     ext/           自带包（#import 的来源）
+#     README.md / LICENSE
+#
+# 产物只上传 Actions Artifacts（不发 Release）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # TCC 二进制包（各平台内部结构见 TCC.md；顶层统一是 tcc/ 目录）
+  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/download/v0.0.2
+  # PHP 构建/运行时（cli 供构建 phar，micro 供拼接单文件）
+  PHP_REL: https://github.com/KingBes/TinyPHP/releases/download/PHP
+
+jobs:
+  package:
+    name: package ${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # PHP 版本以各平台实际可用的 micro 包为准（见 KingBes/TinyPHP release "PHP"）
+          - target: win-x86_64
+            runs-on: windows-latest
+            php_cli: php-8.5.7-cli-win.zip
+            php_micro: php-8.5.7-micro-win.zip
+            tcc_zip: tcc-win-x86_64.zip
+            bin: tphp.exe
+          - target: linux-x86_64
+            runs-on: ubuntu-latest
+            php_cli: php-cli-8.4-linux-x86_64-glibc.zip
+            php_micro: php-micro-8.4-linux-x86_64-glibc.zip
+            tcc_zip: tcc-linux-x86_64.zip
+            bin: tphp
+          - target: linux-aarch64
+            runs-on: ubuntu-24.04-arm
+            php_cli: php-cli-8.4-linux-aarch64-glibc.zip
+            php_micro: php-micro-8.4-linux-aarch64-glibc.zip
+            tcc_zip: tcc-linux-aarch64.zip
+            bin: tphp
+          - target: macos-aarch64
+            runs-on: macos-latest
+            php_cli: php-cli-8.4-macos-aarch64.zip
+            php_micro: php-micro-8.4-macos-aarch64.zip
+            tcc_zip: tcc-macos-aarch64.zip
+            bin: tphp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载构建用 PHP / micro / TCC
+        shell: bash
+        run: |
+          set -e
+          mkdir -p tools/php tools/micro tools/tcc build
+          curl -fsSL --retry 3 -o build/php-cli.zip "${{ env.PHP_REL }}/${{ matrix.php_cli }}"
+          curl -fsSL --retry 3 -o build/micro.zip   "${{ env.PHP_REL }}/${{ matrix.php_micro }}"
+          curl -fsSL --retry 3 -o build/tcc.zip     "${{ env.TCC_BASE }}/${{ matrix.tcc_zip }}"
+
+      - name: 解压构建用 PHP（unix）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          unzip -q build/php-cli.zip -d tools/php
+          PHP_BIN=$(find tools/php -type f -name php | head -1)
+          test -n "$PHP_BIN"
+          chmod +x "$PHP_BIN"
+          echo "PHP_BIN=$PHP_BIN" >> "$GITHUB_ENV"
+
+      - name: 解压构建用 PHP（windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive build/php-cli.zip -DestinationPath tools/php
+          $php = (Get-ChildItem -Recurse tools/php -Filter php.exe | Select-Object -First 1).FullName
+          if (-not $php) { throw 'php.exe 未找到' }
+          "PHP_BIN=" + ($php -replace '\\', '/') >> $env:GITHUB_ENV
+
+      - name: 构建 phar 并组装发布包（纯 PHP：拼接/拷贝/解 TCC 包一条命令）
+        shell: bash
+        run: |
+          set -e
+          "$PHP_BIN" -d phar.readonly=0 build.php \
+            --dist "release/tphp-${{ matrix.target }}" \
+            --micro build/micro.zip \
+            --tcc-zip build/tcc.zip
+
+      - name: 冒烟测试（换 CWD 运行，验证零解压 + 安装根/包查找与 CWD 无关）
+        shell: bash
+        run: |
+          set -e
+          PKG="$(pwd)/release/tphp-${{ matrix.target }}"
+          BIN="$PKG/${{ matrix.bin }}"
+          mkdir -p build/scratch
+          cat > build/scratch/hello.php <<'EOF'
+          <?php
+
+          class Main
+          {
+              public function main(): void
+              {
+                  echo "packaged-ok", "\n";
+              }
+          }
+          EOF
+          cat > build/scratch/use_hello.php <<'EOF'
+          <?php
+
+          #import hello
+
+          use Hello\Hello;
+
+          class Main
+          {
+              public function main(): void
+              {
+                  echo Hello::greet("world"), "\n";
+              }
+          }
+          EOF
+          cd build   # 换到非安装目录运行：安装根必须按可执行文件所在目录解析
+          "$BIN" run scratch/hello.php -o scratch/hello
+          "$BIN" run scratch/use_hello.php -o scratch/use_hello
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tphp-${{ matrix.target }}
+          path: release/
+          retention-days: 14

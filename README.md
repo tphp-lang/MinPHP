@@ -66,6 +66,30 @@ php tests/packages.php                       # 包管理测试（#import 装配/
 产物位置：可执行文件/动态库默认输出到当前目录，C 源码默认输出到当前目录的
 `build/`；用 `-o` 显式指定输出路径时，C 源码与产物同目录。
 
+## 打包分发
+
+CI（`.github/workflows/package.yml`）在 4 个平台（win-x86_64 / linux-x86_64 / linux-aarch64 /
+macos-aarch64）自动打包，产物上传 **Actions Artifacts**：
+
+```
+tphp-<os>-<arch>/
+  tphp[.exe]     编译器本体（micro.sfx + tphp.phar）
+  runtime/       C 运行时头文件（真文件）
+  tcc/           对应平台 TCC 包（含交叉编译器，见 TCC.md）
+  ext/           自带包（#import 的来源）
+  README.md / LICENSE
+```
+
+**运行期零解压** —— `runtime/`、`tcc/`、`ext/` 以真文件随包分发，编译器按可执行文件
+所在目录定位它们（与 CWD 无关）。本地手动打包（一条命令，纯 PHP）：
+
+```bash
+php -d phar.readonly=0 build.php --dist build/dist/tphp-win-x86_64 \
+  --micro build/micro-win.zip --tcc-zip build/tcc-win.zip
+```
+
+详见 `doc/release.md`。
+
 ## 交叉编译
 
 自带 TCC 是按目标划分的独立二进制，交叉开箱即用（Linux 产物为 musl

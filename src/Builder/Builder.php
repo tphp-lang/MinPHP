@@ -96,14 +96,7 @@ final class Builder
         // 包根目录（#flag 相对路径按包根解析；能力汇总用）
         $this->packageDirs = array_values($resolver->roots());
 
-        // #php：M1 只做能力检测与提示（真链接见 M2 / doc/package.md）
-        $phpModules = $this->collectPhpModules($files);
-        $missing = $this->checkLibphp($phpModules);
-        if ($missing !== null) {
-            fwrite(STDERR, $missing);
-            return 1;
-        }
-        $this->reportCapabilities($files, $resolver->roots(), $phpModules);
+        $this->reportCapabilities($files, $resolver->roots());
 
         $entryPath = $entryIndex !== null ? str_replace('\\', '/', $this->pref->inputs[$entryIndex]) : str_replace('\\', '/', $this->pref->inputs[0]);
         (new Checker($table, $errors))->check($files, $entryPath, $this->pref->noMain);
@@ -280,65 +273,14 @@ final class Builder
         return $quoted ? '"' . $norm . '"' : $norm;
     }
 
-    /** 汇总全部文件声明的 #php 模块。 @return list<string> */
-    private function collectPhpModules(array $files): array
-    {
-        $mods = [];
-        foreach ($files as $file) {
-            foreach ($file->phpModules as $m) {
-                $mods[$m] = true;
-            }
-        }
-        return array_keys($mods);
-    }
-
     /**
-     * #php 就绪检测：需要 libphp 的头与链接库（放在项目 php/ 目录）。
-     * 返回 null = 就绪；否则返回错误文案（M2 实现链接前，未就绪即显式报错）。
-     *
-     * @param list<string> $phpModules
-     */
-    private function checkLibphp(array $phpModules): ?string
-    {
-        if ($phpModules === []) {
-            return null;
-        }
-        $root = (string)getcwd() . '/php';
-        $dir = is_dir($root) ? $root : dirname(__DIR__, 2) . '/php';
-        $header = $dir . '/include/php_embed.h';
-        $libs = [$dir . '/php8embed.lib', $dir . '/dev/php8.lib'];
-        $missing = [];
-        if (!is_file($header)) {
-            $missing[] = 'php/include/php_embed.h（PHP 嵌入头；需与 php8.dll 同版本同 ABI）';
-        }
-        $libOk = false;
-        foreach ($libs as $lib) {
-            if (is_file($lib)) {
-                $libOk = true;
-                break;
-            }
-        }
-        if (!$libOk) {
-            $missing[] = 'php/php8embed.lib 或 php/dev/php8.lib（链接库）';
-        }
-        if ($missing === []) {
-            return null;
-        }
-        return "TinyPHP: #php " . implode(' ', $phpModules) . " 需要 libphp，但 php/ 目录未就绪：\n"
-            . '  缺失：' . implode("\n         ", $missing) . "\n"
-            . "  位置：" . str_replace('\\', '/', $dir) . "\n"
-            . "  详见 doc/package.md；未使用 #php 的程序不受影响。\n";
-    }
-
-    /**
-     * 编译期能力汇总（供应链透明）：包 → C 能力；#php → libphp 依赖。
+     * 编译期能力汇总（供应链透明）：列出各包声明的 C 能力。
      *
      * @param array<string, string> $roots 包名 → 包根
-     * @param list<string> $phpModules
      */
-    private function reportCapabilities(array $files, array $roots, array $phpModules): void
+    private function reportCapabilities(array $files, array $roots): void
     {
-        if ($roots === [] && $phpModules === []) {
+        if ($roots === []) {
             return;
         }
         echo "[TinyPHP 能力汇总]\n";
@@ -370,9 +312,6 @@ final class Builder
                 $detail[] = '附加C源: ' . implode(' ', array_keys($srcs));
             }
             printf("  #import %-18s %s\n", $name, $detail === [] ? '（纯自研实现，无 C 能力）' : implode('  ', $detail));
-        }
-        foreach ($phpModules as $mod) {
-            printf("  #php %-22s 链接 libphp（php/），产物将不再是零依赖\n", $mod);
         }
     }
 

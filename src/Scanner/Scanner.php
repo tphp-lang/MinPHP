@@ -149,7 +149,7 @@ final class Scanner
         $this->tokens[] = new Token(TokenKind::DirFlag, trim(substr($this->src, $begin + 4, $this->i - $begin - 4)), $start);
     }
 
-    /** `#import <包名|.相对路径>` 与 `#php <模块名>`：捕获整行参数为单个 token。 */
+    /** `#import <包名>`：捕获整行参数为单个 token。 */
     private function scanPackageDirective(TokenKind $kind, string $word): void
     {
         $start = $this->here();
@@ -309,13 +309,9 @@ final class Scanner
                     $this->scanFlagDirective();
                     continue;
                 }
-                // 包与能力来源：#import（自研 ext） / #php（PHP 原生，需 libphp）
+                // 包导入：#import（自研 ext 包，见 doc/package.md）
                 if ($this->lineHasOnlyWs && $this->matchDirectiveKeyword('import')) {
                     $this->scanPackageDirective(TokenKind::DirImport, 'import');
-                    continue;
-                }
-                if ($this->lineHasOnlyWs && $this->matchDirectiveKeyword('php')) {
-                    $this->scanPackageDirective(TokenKind::DirPhp, 'php');
                     continue;
                 }
                 if ($this->lineHasOnlyWs && $this->matchDirectiveKeyword('struct')) {

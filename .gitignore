@@ -27,7 +27,7 @@ composer.lock
 .bench/*.c
 .bench/*.exe
 
-# PHP 发行版（#php 用；65MB，不入库）
+# PHP 发行版（本地保留，65MB，不入库）
 /php
 
 # 包管理测试的临时工程

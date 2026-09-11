@@ -50,11 +50,8 @@ final class Parser
     /** @var list<string> #flag 编译参数 */
     private array $fileCflags = [];
 
-    /** @var list<string> #import 参数（裸包名，或以 . 开头的项目内相对路径） */
+    /** @var list<string> #import 参数（包名） */
     private array $fileImports = [];
-
-    /** @var list<string> #php 模块名（PHP 原生能力） */
-    private array $filePhpModules = [];
 
     /** 编译目标（平台条件编译 #if 求值用）。 */
     private string $targetOs = 'windows';
@@ -82,7 +79,6 @@ final class Parser
         $this->fileIncludes = [];
         $this->fileCflags = [];
         $this->fileImports = [];
-        $this->filePhpModules = [];
 
         // namespace 必须是文件第一条声明（语句式，每文件最多一个）
         $namespace = '';
@@ -93,7 +89,7 @@ final class Parser
             $this->fileNs = $namespace;
         }
 
-        $file = new File($path, $this->parseTopLevel(), $namespace, $this->fileIncludes, $this->fileCflags, $this->fileImports, $this->filePhpModules);
+        $file = new File($path, $this->parseTopLevel(), $namespace, $this->fileIncludes, $this->fileCflags, $this->fileImports);
         return $file;
     }
 

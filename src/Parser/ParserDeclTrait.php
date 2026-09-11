@@ -51,13 +51,6 @@ trait ParserDeclTrait
                 }
                 continue;
             }
-            if ($this->is(TokenKind::DirPhp)) {
-                $lit = $this->next()->lit;
-                if ($this->validatePhpModule($lit)) {
-                    $this->filePhpModules[] = $lit;
-                }
-                continue;
-            }
             if ($this->is(TokenKind::DirStruct)) {
                 $declared = true;
                 $decls[] = $this->parseCStructRest();
@@ -159,20 +152,6 @@ trait ParserDeclTrait
             $this->errHere(
                 "#import 只接受包名（字母/数字/下划线，可用 / 分层，如 tphp/json），不支持路径形式；得到 \"{$name}\"",
             );
-            return false;
-        }
-        return true;
-    }
-
-    /** #php 校验：只接受模块名（如 json / pcre / hash）。 */
-    private function validatePhpModule(string $mod): bool
-    {
-        if ($mod === '') {
-            $this->errHere('#php 缺少模块名（形如 #php json）');
-            return false;
-        }
-        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $mod) !== 1) {
-            $this->errHere("#php 只接受模块名（字母/数字/下划线，如 json/pcre/hash）；得到 \"{$mod}\"");
             return false;
         }
         return true;

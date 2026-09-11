@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * 包管理测试：#import 自研 ext（含 C 能力声明）与 #php 的门槛检测。
+ * 包管理测试：#import 自研 ext（含 C 能力声明、自带包、覆盖顺序）。
  *
  * 每个用例在 build/tests/pkg_<name>/ 建一个**独立临时工程**（自带 ext/），
  * 以该目录为 CWD 运行编译器（项目 ext/ 优先于编译器自带 ext/）。
@@ -13,9 +13,9 @@ declare(strict_types=1);
  *   3) cycle    —— 环依赖 → 编译错误
  *   4) missing  —— 包不存在 → 编译错误（附搜索路径与可用包）
  *   5) cext     —— 包自带 C 能力（#include/#flag/.c，路径按包根解析）
- *   6) phpgate  —— #php 门槛：未就绪必须显式报错，不静默通过
- *   7) shipped  —— 仓库自带的示例包（ext/tphp/str、ext/demo/native）可用
- *   8) override —— 项目 ext/ 覆盖编译器自带 ext/（同名包项目优先）
+
+ *   6) shipped  —— 仓库自带的示例包（ext/tphp/str、ext/demo/native）可用
+ *   7) override —— 项目 ext/ 覆盖编译器自带 ext/（同名包项目优先）
  *
  * 用法：php tests/packages.php
  */
@@ -283,29 +283,6 @@ PHP);
 check('cext：包自带 C 能力可用', $code === 0 && str_contains($out, 'add=7') && str_contains($out, 'mul=42'), $out);
 check('cext：能力汇总列出 cflags 与附加 C 源', str_contains($out, 'cflags:') && str_contains($out, '附加C源:'), $out);
 
-// ---------------------------------------------------------------- 6) phpgate
-$d = project('phpgate');
-put($d, 'main.php', <<<'PHP'
-<?php
-
-#php json
-
-class Main
-{
-    public function main(): void
-    {
-        echo "x", "\n";
-    }
-}
-PHP);
-[$out, $code] = compileIn($d);
-// M1 只做门槛：未就绪必须显式报错（不得静默成功）
-check(
-    'phpgate：#php 未就绪时显式报错（不静默）',
-    $code !== 0 && (str_contains($out, 'libphp') || str_contains($out, '未定义')),
-    $out,
-);
-
 // ---------------------------------------------------------------- 7) shipped
 // 仓库**自带**的示例包（ext/tphp/str 纯实现 + ext/demo/native 带 C 能力），在仓库根编译
 $entry = $root . '/build/tests/pkg_shipped.php';
@@ -330,7 +307,7 @@ class Main
     }
 }
 PHP);
-[$out, $code] = compileIn($root, 'build/tests/pkg_shipped.php');
+[$out, $code] = compileIn($root, 'build/tests/pkg_shipped.php', '-o build/tests/pkg_shipped.exe');
 check('shipped：自带 ext/tphp/str 可用（纯实现）', $code === 0 && str_contains($out, 'x, y') && str_contains($out, 'sum=6'), $out);
 check('shipped：自带 ext/demo/native 可用（C 能力）', str_contains($out, 'add=7') && str_contains($out, 'mul=42'), $out);
 check('shipped：能力汇总列出两个包', str_contains($out, 'tphp/str') && str_contains($out, 'demo/native'), $out);

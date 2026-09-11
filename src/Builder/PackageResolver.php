@@ -46,6 +46,18 @@ final class PackageResolver
     {
         $pos = new Pos($originFile, $originLine, 1);
 
+        // 名字形式校验（与 Parser::validateImport 同一规则与文案）：
+        // 解析器在 Parser 之前运行，若不在这里拦，路径形式会被当成"包不存在"，
+        // 既丢失"防越界"的明确语义，错误信息也更差。
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)*$/', $name) !== 1) {
+            $this->errors->add(
+                '#import 只接受包名（字母/数字/下划线，可用 / 分层，如 tphp/json），不支持路径形式；'
+                . '得到 "' . $name . '"',
+                $pos,
+            );
+            return [];
+        }
+
         // 环检测必须**先于**"已展开"判定：展开中的包再次出现即真环
         // （先判 expanded 会把环当成"已展开"而静默放过）
         if (in_array($name, $stack, true)) {

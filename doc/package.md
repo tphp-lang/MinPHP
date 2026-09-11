@@ -81,7 +81,11 @@ class Main { public function main(): void { /* json_encode(...) */ } }
 php tests/packages.php    # 包管理：装配 / 传递依赖 / 环依赖 / 缺失包 / C 能力 / #php 门槛
 ```
 
-用例在 `tests/packages.php` 内以**独立临时工程**（自带 `ext/`）构建，CWD 为临时工程目录。
+覆盖 8 个场景（17 项断言）：基本装配 / 传递依赖 / 环依赖 / 缺失包 / 包自带 C 能力 /
+`#php` 门槛 / **仓库自带示例包**（`ext/tphp/str`、`ext/demo/native`）/
+**项目 ext 覆盖编译器 ext**。用例在 `tests/packages.php` 内以**独立临时工程**（自带 `ext/`）
+构建，CWD 为临时工程目录；指令层与包解析的报错用例同时进了主套件
+（`tests/cases/62_import_path_form`、`63_php_module_name`、`64_import_missing`）。
 
 ## 六、M2（打通 libphp）：可行性已实测确认
 
@@ -98,6 +102,11 @@ php tests/packages.php    # 包管理：装配 / 传递依赖 / 环依赖 / 缺�
 冒烟验证（源码 `tests/native/smoke_native.c`，复现步骤见 `tests/native/README.md`）要点：
 - **不需要 php-src 头**：自备最小 ABI 声明即可（`php_embed_init(int, char**)`、`php_embed_shutdown()`、`zend_eval_stringl(const char*, size_t, zval*, const char*)`——注意 `zend_eval_string` 是宏，实际符号带 `l` 后缀）。
 - **不需要 MSVC**：`clang`（MinGW）+ 空桩库即可；`php8embed.lib` 的 `/DEFAULTLIB:OLDNAMES` 等需要空 `.a` 桩（`-L<stubs>`）。
+
+**桥接方式已选定（实测）**：**eval 桥** —— 把调用拼成 PHP 表达式交给 `zend_eval_stringl`
+（参数按 PHP 字面量转义），返回值按 zval 只读解析（不构造 `zend_string`：`zend_string_init` 未导出，
+`zend_string_init_interned` 运行时构造会崩）。**链接**用"从 `php8.dll` 导出表生成的 MinGW 导入库"
++ `php8embed.lib` + MSVC defaultlib 空桩。复现步骤与全部坑点见 `tests/native/README.md`。
 
 M2 待实现（设计要点）：
 1. **签名表**：静态类型语言必须在编译期知道签名 → 编译器自带 `native/<mod>.php`（可从 php-src `*.stub.php` 半自动生成），不可映射的签名（`mixed`/联合/可空/`object`）**显式报错**。

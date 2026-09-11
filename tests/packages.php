@@ -14,6 +14,8 @@ declare(strict_types=1);
  *   4) missing  —— 包不存在 → 编译错误（附搜索路径与可用包）
  *   5) cext     —— 包自带 C 能力（#include/#flag/.c，路径按包根解析）
  *   6) phpgate  —— #php 门槛：未就绪必须显式报错，不静默通过
+ *   7) shipped  —— 仓库自带的示例包（ext/tphp/str、ext/demo/native）可用
+ *   8) override —— 项目 ext/ 覆盖编译器自带 ext/（同名包项目优先）
  *
  * 用法：php tests/packages.php
  */
@@ -303,6 +305,71 @@ check(
     $code !== 0 && (str_contains($out, 'libphp') || str_contains($out, '未定义')),
     $out,
 );
+
+// ---------------------------------------------------------------- 7) shipped
+// 仓库**自带**的示例包（ext/tphp/str 纯实现 + ext/demo/native 带 C 能力），在仓库根编译
+$entry = $root . '/build/tests/pkg_shipped.php';
+@mkdir(dirname($entry), 0777, true);
+file_put_contents($entry, <<<'PHP'
+<?php
+
+#import tphp/str
+#import demo/native
+
+use Tphp\Str\Str;
+use Demo\Native\Api;
+
+class Main
+{
+    public function main(): void
+    {
+        echo Str::csv(["x", "y"]), "\n";
+        echo "sum=", Str::sum([1, 2, 3]), "\n";
+        echo "add=", Api::add(3, 4), "\n";
+        echo "mul=", Api::mul(6, 7), "\n";
+    }
+}
+PHP);
+[$out, $code] = compileIn($root, 'build/tests/pkg_shipped.php');
+check('shipped：自带 ext/tphp/str 可用（纯实现）', $code === 0 && str_contains($out, 'x, y') && str_contains($out, 'sum=6'), $out);
+check('shipped：自带 ext/demo/native 可用（C 能力）', str_contains($out, 'add=7') && str_contains($out, 'mul=42'), $out);
+check('shipped：能力汇总列出两个包', str_contains($out, 'tphp/str') && str_contains($out, 'demo/native'), $out);
+check('shipped：无泄漏', !str_contains($out, 'leaks=') || str_contains($out, 'leaks=0'), $out);
+
+// ---------------------------------------------------------------- 8) override
+// 项目 ext/ 优先于编译器自带 ext/：同名包 tphp/str 由**项目版**生效
+$d = project('override');
+put($d, 'main.php', <<<'PHP'
+<?php
+
+#import tphp/str
+
+use Tphp\Str\Str;
+
+class Main
+{
+    public function main(): void
+    {
+        echo Str::csv(["p"]), "\n";
+    }
+}
+PHP);
+put($d, 'ext/tphp/str/mod.php', "<?php\n\n// @package tphp/str（项目版，覆盖编译器自带）\n");
+put($d, 'ext/tphp/str/src/Str.php', <<<'PHP'
+<?php
+
+namespace Tphp\Str;
+
+final class Str
+{
+    public static function csv(array<string> $parts): string
+    {
+        return "project:" . implode(",", $parts);
+    }
+}
+PHP);
+[$out, $code] = compileIn($d);
+check('override：项目 ext/ 覆盖编译器自带包', $code === 0 && str_contains($out, 'project:p'), $out);
 
 echo "\n{$pass} 通过, {$fail} 失败\n";
 exit($fail === 0 ? 0 : 1);

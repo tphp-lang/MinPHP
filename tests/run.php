@@ -16,6 +16,9 @@ declare(strict_types=1);
  */
 
 $root = dirname(__DIR__);
+// 固定工作目录：`#flag` 的相对路径按 CWD 解析，从别处调用 `php tests/run.php` 也必须行为一致。
+// （`#import` 的包查找与 CWD 无关，只在编译器目录的 ext/ 下查找。）
+chdir($root);
 $php = PHP_BINARY;
 $casesDir = $root . '/tests/cases';
 $multiDir = $root . '/tests/multi';

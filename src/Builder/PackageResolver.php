@@ -11,7 +11,7 @@ use Tphp\Token\Pos;
  * 包解析：把 `#import <包名>` 展开为待编译的源文件集合。
  *
  * 约定（见 doc/package.md）：
- *   - 包 = 项目 `ext/<包名>/` 或编译器自带 `ext/<包名>/`（项目优先，可覆盖）；
+ *   - 包 = **编译器目录的 `ext/<包名>/`**（只此一处，与 CWD 无关）；
  *   - 包名可分层（`tphp/json` → `ext/tphp/json/`）；
  *   - 包内**所有 .php 递归纳入**编译（清单 mod.php 只贡献 #flag/#include 指令）；
  *   - 包之间可互相 `#import`（传递依赖），按 realpath 去重，环依赖报错。
@@ -32,8 +32,8 @@ final class PackageResolver
 
     public function __construct(
         private readonly Errors $errors,
-        private readonly string $projectRoot,
-        private readonly string $compilerRoot,
+        /** 编译器目录的 ext/（包的唯一来源，与 CWD 无关） */
+        private readonly string $extRoot,
     ) {}
 
     /**
@@ -120,7 +120,7 @@ final class PackageResolver
     /** 搜索目录（诊断信息用）。 @return list<string> */
     public function searchDirs(): array
     {
-        return [$this->projectRoot . '/ext', $this->compilerRoot . '/ext'];
+        return [$this->extRoot];
     }
 
     /** 搜索目录下可见的包名（错误提示用）。 @return list<string> */
@@ -128,18 +128,23 @@ final class PackageResolver
     {
         $names = [];
         foreach ($this->searchDirs() as $dir) {
+            if (!is_dir($dir)) {
+                continue; // 搜索目录可能不存在（scandir 会抛 Warning）
+            }
             foreach (scandir($dir) ?: [] as $entry) {
                 if ($entry === '.' || $entry === '..' || str_starts_with($entry, '.')) {
                     continue;
                 }
                 if (is_dir($dir . '/' . $entry)) {
                     $names[$entry] = true;
-                    // 一层子包（tphp/json）也提示出来
+                    // 一层子包（tphp/json）也提示出来：以 mod.php 清单为准，
+                    // 避免把 src/ include/ 之类的实现子目录误列为包
                     foreach (scandir($dir . '/' . $entry) ?: [] as $sub) {
                         if ($sub === '.' || $sub === '..' || str_starts_with($sub, '.')) {
                             continue;
                         }
-                        if (is_dir($dir . '/' . $entry . '/' . $sub)) {
+                        if (is_dir($dir . '/' . $entry . '/' . $sub)
+                            && is_file($dir . '/' . $entry . '/' . $sub . '/mod.php')) {
                             $names[$entry . '/' . $sub] = true;
                         }
                     }
@@ -149,7 +154,7 @@ final class PackageResolver
         return array_keys($names);
     }
 
-    /** 定位包目录：项目 ext/ 优先，其次编译器自带 ext/。 */
+    /** 定位包目录：只在编译器目录的 ext/ 下查找。 */
     private function locate(string $name): ?string
     {
         if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)*$/', $name) !== 1) {

@@ -59,7 +59,8 @@ final class Builder
         $parser = new Parser($errors);
 
         // 包展开（#import）：把包内源文件并入编译单元（辅助文件，排在入口之前）
-        $resolver = new PackageResolver($errors, (string)getcwd(), dirname(__DIR__, 2));
+        // 包只在**编译器目录**的 ext/ 下查找（与 CWD 无关）
+        $resolver = new PackageResolver($errors, dirname(__DIR__, 2) . '/ext');
         $extFiles = $this->expandPackages($resolver, $sources, $this->pref->inputs);
         if ($errors->hasErrors()) {
             return $this->report($errors);

@@ -178,7 +178,6 @@ Parser（对应 trait 一段）→ Checker（标注）→ Gen（输出）。
 
 **包管理已落地（2026-09-11）**：`#import <包名>` 引入自研标准库扩展（`ext/`，命名空间隔离、
 传递依赖自动装配、环依赖检测、C 能力显式声明 + 编译期能力汇总）；设计见 `doc/package.md`。
-**已放弃**：直连 libphp（embed）复用 PHP 原生能力的方案——结论见 `doc/not-doing.md`。
 
 评估后**明确不做**的项（object 类型 / object 专表纯匿名类 / 匿名类 / 流敏感收窄）
 见 `doc/not-doing.md`，每条附理由与重启条件。

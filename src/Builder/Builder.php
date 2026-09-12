@@ -345,10 +345,27 @@ final class Builder
         fwrite(STDERR, '共 ' . $errors->warningCount() . " 个警告\n");
     }
 
+    /**
+     * 启动编译产物并等待退出。
+     *
+     * 用 proc_open + php://stdin/stdout/stderr 让子进程继承 PHP 进程的真实
+     * 控制台句柄（Windows 上 passthru/popen 会创建管道，C 运行时检测到非终端
+     * 就切全缓冲——长时间运行的程序输出攒到退出才可见）。
+     * 子进程拿到真正的控制台后，C 运行时自动切行缓冲，每行实时刷出。
+     */
     private function runExe(string $exe): int
     {
-        $code = 0;
-        passthru(escapeshellarg($exe), $code);
-        return $code;
+        $descriptors = [
+            0 => ['file', 'php://stdin', 'r'],
+            1 => ['file', 'php://stdout', 'w'],
+            2 => ['file', 'php://stderr', 'w'],
+        ];
+        $proc = proc_open(escapeshellarg($exe), $descriptors, $pipes);
+        if (!is_resource($proc)) {
+            fwrite(STDERR, "TinyPHP: 无法启动 {$exe}\n");
+            return 1;
+        }
+        $code = proc_close($proc);
+        return (int)$code;
     }
 }

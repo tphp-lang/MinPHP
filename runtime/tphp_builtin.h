@@ -162,7 +162,30 @@ static double tphp_str_to_double(String s)
 static int32_t tphp_int_pow(int32_t base, int32_t exp)
 {
     if (exp < 0) {
-        return (int32_t)pow((double)base, (double)exp);
+        // 负次幂：整数域 1 / |base|^|exp|（|base|>=2 时结果为 0，base=±1 时为 ±1）。
+        // 不复用 pow()：避免引入 libm 依赖（Linux/macOS 默认不链接 -lm，会导致每个程序链接失败），
+        // 且 double 中转对大整数有精度损失、base=0 的负次幂是 UB。
+        if (base == 0) {
+            return 0; /* 0 的负次幂数学上未定义，整数域按 0 处理 */
+        }
+        uint32_t b = (uint32_t)(base < 0 ? -(uint32_t)base : (uint32_t)base);
+        uint32_t r = 1u;
+        int ae = -exp; /* exp<0 → ae>0 */
+        while (ae > 0) {
+            if (ae & 1) {
+                r *= b;
+            }
+            b *= b;
+            ae >>= 1;
+        }
+        if (r == 0) {
+            return 0;
+        }
+        int32_t inv = (int32_t)(1u / r);     /* r>=1：r==1 → 1，r>=2 → 0 */
+        if (base < 0 && (exp & 1)) {          /* 负底且 |exp| 为奇数 → 结果取负 */
+            inv = -inv;
+        }
+        return inv;
     }
     uint32_t b = (uint32_t)base;
     uint32_t r = 1u;

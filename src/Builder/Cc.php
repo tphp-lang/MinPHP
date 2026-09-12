@@ -34,6 +34,17 @@ final class Cc
                 return null;
             }
         }
+        // Windows 可执行文件必须带 .exe：原生 tcc 即使 -o 无扩展也会自动产出 .exe，
+        // 且 cmd 不会为带引号的路径补扩展名、也不会执行无扩展名文件。这里把输出路径
+        // 显式归一化，保证传给 tcc 的 -o 与返回的产物路径同磁盘真实文件一致（--run 才能找到）。
+        // 动态库同理补 .dll。非 Windows 目标可执行文件无扩展名，保持原样。
+        if ($pref->os === 'windows') {
+            $ext = $pref->shared ? '.dll' : '.exe';
+            if (!str_ends_with(strtolower($exeFile), $ext)) {
+                $exeFile .= $ext;
+            }
+        }
+
         $cmd = self::buildCommand($pref, $cFile, $exeFile, $runtimeDir, $cflags, $extraSources, $tcc);
         $escaped = implode(' ', array_map('escapeshellarg', $cmd));
         echo "> {$escaped}\n";
@@ -95,6 +106,11 @@ final class Cc
             $cmd[] = $src;
         }
         $cmd[] = $cFile;
+        // Linux/macOS 的 libm（pow/sqrt 等数学符号）不在默认链接集，需显式 -lm；
+        // 且 -lm 必须排在引用它的目标文件（即 $cFile）之后。Windows 的 msvcrt 已内联这些符号，无需 -lm。
+        if ($pref->os !== 'windows') {
+            $cmd[] = '-lm';
+        }
         return $cmd;
     }
 

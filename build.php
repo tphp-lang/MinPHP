@@ -170,6 +170,75 @@ function copyDir(string $src, string $dst): void
     }
 }
 
+/**
+ * 解压 zip 到目标目录。
+ * 优先 ZipArchive；回退 PharData（phar 扩展内置 zip 读支持，不依赖可选 zip 扩展——
+ * CI 的精简 PHP 常缺 zip 扩展但有 phar）。两者皆无则明确报错（不静默）。
+ */
+function zipExtract(string $zip, string $dest): void
+{
+    if (class_exists('ZipArchive', false)) {
+        $z = new ZipArchive();
+        $z->open($zip) === true || fail("zip 无法打开（不是有效 zip）：{$zip}");
+        $z->extractTo($dest) || fail("zip 解压失败：{$zip}");
+        $z->close();
+        return;
+    }
+    if (class_exists('PharData', false)) {
+        try {
+            (new PharData($zip))->extractTo($dest, null, true);
+            return;
+        } catch (\Throwable $e) {
+            fail("zip 解压失败（PharData）：{$zip}（{$e->getMessage()}）");
+        }
+    }
+    fail("无法解压 {$zip}：当前 PHP 既无 ZipArchive 也无 PharData（请启用 zip 或 phar 扩展）");
+}
+
+/** 读取 zip 内单个条目的原始内容（按 basename 匹配）。 */
+function zipReadEntry(string $zip, string $name): string
+{
+    if (class_exists('ZipArchive', false)) {
+        $z = new ZipArchive();
+        $z->open($zip) === true || fail("zip 无法打开（不是有效 zip）：{$zip}");
+        $idx = -1;
+        for ($i = 0; $i < $z->numFiles; $i++) {
+            if (basename($z->getNameIndex($i)) === $name) {
+                $idx = $i;
+                break;
+            }
+        }
+        if ($idx < 0) {
+            $entries = [];
+            for ($i = 0; $i < $z->numFiles; $i++) {
+                $entries[] = $z->getNameIndex($i);
+            }
+            $z->close();
+            fail("zip 内无 {$name}（实际条目：" . implode(', ', $entries) . '）');
+        }
+        $data = $z->getFromIndex($idx);
+        $z->close();
+        $data !== false || fail("读取 {$name} 失败：{$zip}");
+        return $data;
+    }
+    if (class_exists('PharData', false)) {
+        try {
+            $pd = new PharData($zip);
+            if (!isset($pd[$name])) {
+                $entries = [];
+                foreach (new RecursiveIteratorIterator($pd) as $f) {
+                    $entries[] = $f->getPathname();
+                }
+                fail("zip 内无 {$name}（实际条目：" . implode(', ', $entries) . '）');
+            }
+            return $pd[$name]->getContent();
+        } catch (\Throwable $e) {
+            fail("读取 {$name} 失败（PharData）：{$zip}（{$e->getMessage()}）");
+        }
+    }
+    fail("无法读取 {$zip}：当前 PHP 既无 ZipArchive 也无 PharData（请启用 zip 或 phar 扩展）");
+}
+
 if ($dist === null) {
     exit(0);
 }
@@ -192,10 +261,7 @@ foreach (['README.md', 'LICENSE'] as $doc) {
 // TCC 包：解压进发布目录（顶层 tcc/），并校验结构
 if ($tccZip !== null) {
     is_file($tccZip) || fail("TCC 包不存在：{$tccZip}");
-    $z = new ZipArchive();
-    $z->open($tccZip) === true || fail("TCC 包无法打开（不是有效 zip）：{$tccZip}");
-    $z->extractTo($dist) || fail("TCC 包解压失败：{$tccZip}");
-    $z->close();
+    zipExtract($tccZip, $dist);
     $native = PHP_OS_FAMILY === 'Windows' ? 'tcc.exe' : 'tcc';
     is_dir($dist . '/tcc') || fail('TCC 包顶层没有 tcc/ 目录（结构见 TCC.md）');
     is_file($dist . '/tcc/' . $native) || fail("TCC 包缺少本机编译器 tcc/{$native}（结构见 TCC.md）");
@@ -214,26 +280,7 @@ if ($tccZip !== null) {
 if ($micro !== null) {
     if (str_ends_with(strtolower($micro), '.zip')) {
         is_file($micro) || fail("micro 包不存在：{$micro}");
-        $z = new ZipArchive();
-        $z->open($micro) === true || fail("micro 包无法打开（不是有效 zip）：{$micro}");
-        $idx = -1;
-        for ($i = 0; $i < $z->numFiles; $i++) {
-            if (basename($z->getNameIndex($i)) === 'micro.sfx') {
-                $idx = $i;
-                break;
-            }
-        }
-        if ($idx < 0) {
-            $entries = [];
-            for ($i = 0; $i < $z->numFiles; $i++) {
-                $entries[] = $z->getNameIndex($i);
-            }
-            $z->close();
-            fail('micro 包里没有 micro.sfx（实际条目：' . implode(', ', $entries) . '）');
-        }
-        $sfx = $z->getFromIndex($idx);
-        $z->close();
-        $sfx !== false || fail("读取 micro.sfx 失败：{$micro}");
+        $sfx = zipReadEntry($micro, 'micro.sfx');
     } else {
         is_file($micro) || fail("micro.sfx 不存在：{$micro}");
         $sfx = file_get_contents($micro);

@@ -352,7 +352,11 @@ final class Table
         $code = $this->nextCtype++;
         $cBase = $baseCode !== null && isset($this->cnames[$baseCode])
             ? $this->cnames[$baseCode]
-            : Type::mangleName($baseName);
+            : (str_starts_with($baseName, 'c.')
+                // 裸 c.<name>*：引用 C 头文件里的 struct tag → struct <name>*
+                // （typedef 类型请经 #struct 注册后用 <Name>*，或用 c.ptr 强转）
+                ? 'struct ' . substr($baseName, 2)
+                : Type::mangleName($baseName));
         // string 借用不可写：c.char* 以 const char* 表示
         if ($cBase === 'char') {
             $cBase = 'const char';

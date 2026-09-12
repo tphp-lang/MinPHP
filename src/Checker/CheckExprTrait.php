@@ -344,7 +344,21 @@ trait CheckExprTrait
     private function checkClosure(ClosureExpr $e): int
     {
         $paramTypes = [];
-        $closureFn = new FnSymbol('%closure', $e->pos);
+        // FnSymbol 按 AST 节点记忆化：两遍检查共用，调用点（pass 1）回填的
+        // callable 形参签名经 paramRebuild 保留，pass 2 闭包体内可 invoke callable 形参
+        $prevSigs = [];
+        if (isset($this->closureFns[$e])) {
+            foreach ($this->closureFns[$e]->params as $op) {
+                if ($op->closureSig !== null) {
+                    $prevSigs[$op->name] = $op->closureSig;
+                }
+            }
+            $closureFn = $this->closureFns[$e];
+            $closureFn->params = []; // 参数重建（类型解析幂等），签名由 prevSigs 回带
+        } else {
+            $closureFn = new FnSymbol('%closure', $e->pos);
+            $this->closureFns[$e] = $closureFn;
+        }
         if ($e->adapterOf !== null) {
             // f(...) 一等可调用适配器：签名 = 被引用函数（单参适配）
             $target = $this->table->fns[$e->adapterOf] ?? null;
@@ -373,6 +387,12 @@ trait CheckExprTrait
             $paramTypes[] = $t;
             $closureFn->params[] = new ParamSymbol($t, $p->name, $p->hasDefault, $p->default, $p->pos);
         }
+        // 上遍（pass 1）调用点回填的 callable 形参签名回带到重建后的形参
+        foreach ($closureFn->params as $ps) {
+            if ($ps->closureSig === null && isset($prevSigs[$ps->name])) {
+                $ps->closureSig = $prevSigs[$ps->name];
+            }
+        }
 
         // 捕获列表：类型取自创建点作用域；byRef 标记外层变量为盒子存储
         $resolved = [];
@@ -389,7 +409,7 @@ trait CheckExprTrait
                     $sym->boxed = true;
                 }
             }
-            $resolved[] = ['name' => $c['name'], 'byRef' => $c['byRef'], 'type' => $sym->type, 'boxed' => $sym->boxed];
+            $resolved[] = ['name' => $c['name'], 'byRef' => $c['byRef'], 'type' => $sym->type, 'boxed' => $sym->boxed, 'closureSig' => $sym->closureSig];
         }
         foreach ($e->params as $p) {
             foreach ($resolved as $c) {
@@ -413,10 +433,13 @@ trait CheckExprTrait
         foreach ($resolved as $c) {
             $vs = new VarSymbol($c['name'], $c['type'], $e->pos);
             $vs->isCapture = true;
+            $vs->closureSig = $c['closureSig']; // 调用签名跨闭包边界：use 捕获的 callable 仍可 invoke
             $scope->vars[$c['name']] = $vs;
         }
         foreach ($closureFn->params as $ps) {
-            $scope->vars[$ps->name] = new VarSymbol($ps->name, $ps->type, $ps->pos);
+            $vs = new VarSymbol($ps->name, $ps->type, $ps->pos);
+            $vs->closureSig = $ps->closureSig; // 调用点回填的签名：闭包自身 callable 形参可 invoke
+            $scope->vars[$ps->name] = $vs;
         }
         $this->scope = $scope;
         $this->curFn = $closureFn;
@@ -466,6 +489,10 @@ trait CheckExprTrait
                     $this->error('闭包调用缺少第 ' . ($i + 1) . ' 个参数', $e->pos);
                 }
             }
+            // callable 形参回填：实参已检查，字面量实参的 sig 就绪
+            if (isset($this->closureFns[$e->callee])) {
+                $this->backfillCallableParams($this->closureFns[$e->callee], $e->args, $n);
+            }
             return $sig['ret'];
         }
         $name = $e->callee instanceof VarExpr ? $e->callee->name : '';
@@ -502,6 +529,10 @@ trait CheckExprTrait
             } else {
                 $this->error('闭包调用缺少第 ' . ($i + 1) . ' 个参数', $e->pos);
             }
+        }
+        // callable 形参回填：实参已检查，签名就绪（两遍检查下闭包体内可 invoke callable 形参）
+        if ($sym->closureFn !== null) {
+            $this->backfillCallableParams($sym->closureFn, $e->args, $n);
         }
         return $sig['ret'];
     }
@@ -966,6 +997,7 @@ trait CheckExprTrait
                     $tsym = $this->scope->find($target->name);
                     if ($tsym !== null) {
                         $tsym->closureSig = $e->value->sig;
+                        $tsym->closureFn = $this->closureFns[$e->value] ?? null;
                     }
                 } elseif ($e->value instanceof CallExpr && $e->value->retClosureSig !== null
                     && $target instanceof VarExpr) {
@@ -978,6 +1010,9 @@ trait CheckExprTrait
                     $tsym = $this->scope->find($target->name);
                     if ($ssym?->closureSig !== null && $tsym !== null) {
                         $tsym->closureSig = $ssym->closureSig;
+                    }
+                    if ($ssym !== null && $tsym !== null) {
+                        $tsym->closureFn = $ssym->closureFn;
                     }
                 }
             }
@@ -1042,12 +1077,14 @@ trait CheckExprTrait
         $vs = new VarSymbol($target->name, $vt, $e->pos);
         if ($e->value instanceof ClosureExpr) {
             $vs->closureSig = $e->value->sig;
+            $vs->closureFn = $this->closureFns[$e->value] ?? null;
         } elseif ($e->value instanceof CallExpr && $e->value->retClosureSig !== null) {
             $vs->closureSig = $e->value->retClosureSig;
         } elseif ($e->value instanceof VarExpr) {
             $ssym = $this->scope->find($e->value->name);
             if ($ssym !== null) {
                 $vs->closureSig = $ssym->closureSig;
+                $vs->closureFn = $ssym->closureFn;
             }
         }
         if (isset($this->boxedNames[$target->name])) {
@@ -1402,21 +1439,42 @@ trait CheckExprTrait
                 }
                 // callable 形参：闭包实参的签名流入形参（函数体内 $f(...) 按此校验）
                 if ($this->table->isCallable($param->type)) {
-                    $argSig = null;
-                    if ($args[$i] instanceof ClosureExpr) {
-                        $argSig = $args[$i]->sig;
-                    } elseif ($args[$i] instanceof VarExpr) {
-                        $ssym = $this->scope->find($args[$i]->name);
-                        $argSig = $ssym?->closureSig;
-                    } elseif ($args[$i] instanceof CallExpr) {
-                        $argSig = $args[$i]->retClosureSig;
-                    }
+                    $argSig = $this->callableArgSig($args[$i]);
                     if ($argSig !== null) {
                         $param->closureSig = $argSig;
                     }
                 }
             } elseif (!$param->hasDefault) {
                 $this->error("'{$fn->name}()' 缺少参数 \${$param->name}", $pos);
+            }
+        }
+    }
+
+    /** callable 实参的闭包签名：闭包字面量 / 已赋值闭包变量 / 返回闭包的调用表达式。 */
+    private function callableArgSig(Expr $arg): ?array
+    {
+        if ($arg instanceof ClosureExpr) {
+            return $arg->sig;
+        }
+        if ($arg instanceof VarExpr) {
+            return $this->scope->find($arg->name)?->closureSig;
+        }
+        if ($arg instanceof CallExpr) {
+            return $arg->retClosureSig;
+        }
+        return null;
+    }
+
+    /** 调用点回填：闭包 callable 形参从实参流入签名（闭包体内 $fn(...) 依赖此签名）。 */
+    private function backfillCallableParams(FnSymbol $closureFn, array $args, int $n): void
+    {
+        foreach ($closureFn->params as $i => $cp) {
+            if ($i >= $n || !$this->table->isCallable($cp->type)) {
+                continue;
+            }
+            $argSig = $this->callableArgSig($args[$i]);
+            if ($argSig !== null) {
+                $cp->closureSig = $argSig;
             }
         }
     }

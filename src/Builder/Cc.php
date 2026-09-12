@@ -96,8 +96,17 @@ final class Cc
         }
         // #flag 参数（用户 --cflag 之后追加 .c 附加源文件；
         // .c 项从 flag 中剔除——已提升为 extraSources，避免重复编译）
+        // -l* 库参必须移到输入文件之后：GNU ld 按命令行顺序扫描，库排在
+        // 目标文件之前时无未决符号可挂靠——binutils 2.46 (MinGW64) 实测
+        // 直接崩溃（exit code 为崩溃码低字节，如 5/37），且无任何诊断输出；
+        // tcc/lld 对顺序不敏感，后置同样有效。
+        $libFlags = [];
         foreach (array_merge($cflags, $pref->cflags) as $flag) {
             if (str_ends_with($flag, '.c')) {
+                continue;
+            }
+            if (str_starts_with($flag, '-l')) {
+                $libFlags[] = $flag;
                 continue;
             }
             $cmd[] = $flag;
@@ -106,6 +115,9 @@ final class Cc
             $cmd[] = $src;
         }
         $cmd[] = $cFile;
+        foreach ($libFlags as $lib) {
+            $cmd[] = $lib;
+        }
         // Linux/macOS 的 libm（pow/sqrt 等数学符号）不在默认链接集，需显式 -lm；
         // 且 -lm 必须排在引用它的目标文件（即 $cFile）之后。Windows 的 msvcrt 已内联这些符号，无需 -lm。
         if ($pref->os !== 'windows') {

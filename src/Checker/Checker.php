@@ -52,11 +52,15 @@ final class Checker
     /** 闭包签名预流动遍：只传播签名数据（错误丢弃），正式检查在其后。 */
     public bool $sigOnly = false;
 
+    /** @var \SplObjectStorage<ClosureExpr, FnSymbol> 闭包字面量 → FnSymbol（跨两遍记忆化：调用点回填的 callable 形参签名在 pass 2 存活） */
+    private \SplObjectStorage $closureFns;
+
     public function __construct(
         private readonly Table $table,
         private readonly Errors $errors,
     ) {
         $this->scope = new Scope();
+        $this->closureFns = new \SplObjectStorage();
     }
 
     /** @param list<File> $files */

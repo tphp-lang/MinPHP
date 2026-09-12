@@ -18,6 +18,9 @@ final class VarSymbol
     /** callable 变量的闭包签名（Checker 从闭包字面量回填）：[ret, list<paramType>] */
     public ?array $closureSig = null;
 
+    /** 变量承接的闭包 FnSymbol（Checker 内部：调用点回填 callable 形参签名的入口） */
+    public ?FnSymbol $closureFn = null;
+
     /** 被 use (&$var) 引用捕获：存储提升为堆盒子（doc/closure.md §3.5） */
     public bool $boxed = false;
 

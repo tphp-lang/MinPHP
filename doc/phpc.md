@@ -161,6 +161,16 @@ int $r = c->cfn_apply(5, $f, null); // 尾参 ud 传任意值均可（被忽略�
 
 - 闭包签名必须与 C 回调去掉尾参后的部分一致（参数类型/返回类型）
 - 一个 `c_fn` 调用点对应一个独立 trampoline 与槽；多次调用同一 `c_fn` 共享最新闭包
+- **承接闭包的变量不要标注 `c.ptr`**：`c.ptr $f = fn ...` 报
+  `初始化类型不匹配：期望 c.ptr，得到 callable`（标注抹掉 c_fn 依赖的签名推导）。
+  先用无标注变量承接闭包，再 `c_fn($f)`；`c.ptr` 标在 **c_fn 的返回值**上才合法（如上例）
+- **嵌套闭包不可用**：闭包字面量写在另一闭包体内，前端接受但生成的 C 编译失败
+  （v0.3 已知缺陷，见 `doc/closure.md` §6.1）；c_fn 闭包写在方法体内一层不受影响
+- **c_fn 闭包体内调用 `callable`** ✅：`use` 捕获的（签名随捕获传递）与
+  本闭包 `callable` 形参的（签名经调用点回填）均可调用，用例 `66_closure_callable_use`。
+  `callable` 变量 / 形参传给 `c_fn` 可行；回调逻辑也可直接写在闭包体内（C 调用 /
+  字面量 / `ClassName::method()` / 全局函数——`self::` 在闭包内静默返回 0，勿用，
+  见 `doc/closure.md` §6.1 缺陷 ③）
 
 **C 内存自动管理**：开发者不写 `free`。`cbuf` / `c_own` 登记的指针由编译器在
 函数所有出口（return / throw / 错误传播 / 隐式结束）自动释放——与 TinyPHP
@@ -194,6 +204,10 @@ $p->r = 255;                       // 箭头访问 + 前置空指针 panic
 - cstruct 值语义：与 TinyPHP 数组的引用语义不同（文档 `doc/memory.md`）
 - C 内存：`cbuf` / `c_own` 登记，函数出口自动 free——开发者不写 free
 - `X*` 指针：`(X*)` 强转来自 `c.ptr` / CVAL / 其他指针
+- `c.<tag>*`（裸 C 类型指针，可在属性/参数/返回/局部位置）：引用 C 头文件里的
+  struct tag，生成 `struct <tag>*`——如 `c.mg_context*` → `struct mg_context*`
+  （配合 `struct mg_context;` 前向声明句柄）；typedef 类型（`FILE*` 等）
+  经 `#struct` 注册后用 `<Name>*`，或用 `c.ptr` + 强转
 - `array<Color>` 合法：按 `sizeof` 原始字节存储，引用计数不涉及
 - echo cstruct/CVAL → 编译错误（输出用 `c->printf`）
 

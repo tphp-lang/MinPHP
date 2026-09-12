@@ -55,7 +55,7 @@ TCC 的目标平台在编译 tcc 自身时由 `TCC_TARGET_*` 宏决定（`-arch`
 | `macos-aarch64` | `macos-latest` | `php-cli-8.4-macos-aarch64.zip` | `php-micro-8.4-macos-aarch64.zip` | `tcc-macos-aarch64.zip` |
 
 - 宿主 PHP / micro 来自 `KingBes/TinyPHP` release `PHP`（版本以各平台实际可用的包为准：Windows 8.5.7、其余 8.4）
-- TCC 包来自 `tphp-lang/tccbin` release `v0.0.2`
+- TCC 包来自 `tphp-lang/tccbin` **最新 release**（`releases/latest/download/<包名>` 稳定链接，资产名不含版本号）
 - 触发：push `main` / PR / 手动；产物名 `tphp-<target>`
 - 组装由 `build.php --dist` 完成 —— **CI 与本地是同一条命令**（拼接/拷贝/解 TCC 包全在 PHP 内）
 - 冒烟：换 CWD 跑 `hello`（纯编译）与 `#import hello`（走随包 `ext/`）

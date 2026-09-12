@@ -34,7 +34,7 @@ permissions:
 
 env:
   # TCC 二进制包（各平台内部结构见 TCC.md；顶层统一是 tcc/ 目录）
-  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/download/v0.0.2
+  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/latest/download
   # PHP 构建/运行时（cli 供运行编译器前端；测试不需 micro）
   PHP_REL: https://github.com/KingBes/TinyPHP/releases/download/PHP
 

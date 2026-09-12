@@ -2,13 +2,13 @@
 
 从 [tinycc](https://repo.or.cz/tinycc.git) mob 分支构建的独立 TCC 编译器二进制包，CI 产物见 Actions Artifacts。
 
-[tcc-win-x86_64](https://github.com/tphp-lang/tccbin/releases/download/v0.0.2/tcc-win-x86_64.zip)
+[tcc-win-x86_64](https://github.com/tphp-lang/tccbin/releases/latest/download/tcc-win-x86_64.zip)
 
-[tcc-macos-aarch64](https://github.com/tphp-lang/tccbin/releases/download/v0.0.2/tcc-macos-aarch64.zip)
+[tcc-macos-aarch64](https://github.com/tphp-lang/tccbin/releases/latest/download/tcc-macos-aarch64.zip)
 
-[tcc-linux-x86_64](https://github.com/tphp-lang/tccbin/releases/download/v0.0.2/tcc-linux-x86_64.zip)
+[tcc-linux-x86_64](https://github.com/tphp-lang/tccbin/releases/latest/download/tcc-linux-x86_64.zip)
 
-[tcc-linux-aarch64](https://github.com/tphp-lang/tccbin/releases/download/v0.0.2/tcc-linux-aarch64.zip)
+[tcc-linux-aarch64](https://github.com/tphp-lang/tccbin/releases/latest/download/tcc-linux-aarch64.zip)
 
 ## 交叉编译支持
 

@@ -25,7 +25,7 @@ concurrency:
 
 env:
   # TCC 二进制包（各平台内部结构见 TCC.md；顶层统一是 tcc/ 目录）
-  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/download/v0.0.2
+  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/latest/download
   # PHP 构建/运行时（cli 供构建 phar，micro 供拼接单文件）
   PHP_REL: https://github.com/KingBes/TinyPHP/releases/download/PHP
 

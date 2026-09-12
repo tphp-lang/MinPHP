@@ -1,0 +1,213 @@
+name: Test
+
+# 测试 TinyPHP 编译器在不同 C 后端下的行为与交叉编译能力。
+#
+# 本工作流**不打包**、**不嵌入 php_micro**，直接从源码运行编译器（`php main.php`），
+# 仅下载构建所需的 PHP CLI 与 TCC 二进制包（TCC 包提供了各平台的交叉编译器）。
+#
+# 矩阵每个条目 = （平台 × 编译器形态）：
+#   1) 自带 tcc 原生           —— 编译 + 运行（验证产物可执行、安装根/包查找与 CWD 无关）
+#   2) --cc gcc / --cc clang   —— 编译 + 运行（系统编译器：unix 预装，windows 本工作流 choco 安装）
+#   3) 自带 tcc 交叉编译        —— 仅编译（目标平台不能在当前 runner 直接运行），校验产物 magic 字节
+#
+# 交叉目标依据 TCC.md 各平台随包 tcc 能力：
+#   win-x86_64  : tcc.exe / i386-win32-tcc.exe / x86_64-tcc.exe / arm64-tcc.exe
+#   linux-x86_64  : tcc / x86_64-win32-tcc / i386-win32-tcc
+#   linux-aarch64  : tcc / x86_64-win32-tcc
+#   macos-aarch64  : tcc / x86_64-win32-tcc / i386-win32-tcc / x86_64-tcc / arm64-tcc
+# （macOS 目标无交叉 tcc，故不枚举 darwin 交叉；linux/macOS 的 ELF 为 musl 静态链接，magic 仍是 7f454c46）
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'runtime/**'
+      - 'main.php'
+      - 'build.php'
+      - '.github/workflows/test.yml'
+  pull_request:
+
+# 权限：只读仓库（checkout）+ 通过 gh api 下载 release 包
+permissions:
+  contents: read
+
+env:
+  # TCC 二进制包（各平台内部结构见 TCC.md；顶层统一是 tcc/ 目录）
+  TCC_BASE: https://github.com/tphp-lang/tccbin/releases/download/v0.0.2
+  # PHP 构建/运行时（cli 供运行编译器前端；测试不需 micro）
+  PHP_REL: https://github.com/KingBes/TinyPHP/releases/download/PHP
+
+jobs:
+  test:
+    name: "${{ matrix.target }} · ${{ matrix.variant }}"
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 平台基础信息：php_cli 与 tcc_zip 按各平台可用包（见 KingBes/TinyPHP release "PHP" / tphp-lang/tccbin）
+        # 每个条目都带全平台字段，避免矩阵合并歧义
+        include:
+          # ===== win-x86_64 =====
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: tcc,   cc: tcc }
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: gcc,   cc: gcc }
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: clang, cc: clang }
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: cross, 'cross-os': windows, 'cross-arch': i386,    magic: '4d5a',     mlen: 2 }
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: cross, 'cross-os': linux,   'cross-arch': x86_64,  magic: '7f454c46', mlen: 4 }
+          - { target: win-x86_64, runs-on: windows-latest, php_cli: php-8.5.7-cli-win.zip, tcc_zip: tcc-win-x86_64.zip, variant: cross, 'cross-os': linux,   'cross-arch': arm64,   magic: '7f454c46', mlen: 4 }
+          # ===== linux-x86_64 =====
+          - { target: linux-x86_64, runs-on: ubuntu-latest, php_cli: php-cli-8.4-linux-x86_64-glibc.zip, tcc_zip: tcc-linux-x86_64.zip, variant: tcc,   cc: tcc }
+          - { target: linux-x86_64, runs-on: ubuntu-latest, php_cli: php-cli-8.4-linux-x86_64-glibc.zip, tcc_zip: tcc-linux-x86_64.zip, variant: gcc,   cc: gcc }
+          - { target: linux-x86_64, runs-on: ubuntu-latest, php_cli: php-cli-8.4-linux-x86_64-glibc.zip, tcc_zip: tcc-linux-x86_64.zip, variant: clang, cc: clang }
+          - { target: linux-x86_64, runs-on: ubuntu-latest, php_cli: php-cli-8.4-linux-x86_64-glibc.zip, tcc_zip: tcc-linux-x86_64.zip, variant: cross, 'cross-os': windows, 'cross-arch': x86_64, magic: '4d5a',     mlen: 2 }
+          - { target: linux-x86_64, runs-on: ubuntu-latest, php_cli: php-cli-8.4-linux-x86_64-glibc.zip, tcc_zip: tcc-linux-x86_64.zip, variant: cross, 'cross-os': windows, 'cross-arch': i386,   magic: '4d5a',     mlen: 2 }
+          # ===== linux-aarch64 =====
+          - { target: linux-aarch64, runs-on: ubuntu-24.04-arm, php_cli: php-cli-8.4-linux-aarch64-glibc.zip, tcc_zip: tcc-linux-aarch64.zip, variant: tcc,   cc: tcc }
+          - { target: linux-aarch64, runs-on: ubuntu-24.04-arm, php_cli: php-cli-8.4-linux-aarch64-glibc.zip, tcc_zip: tcc-linux-aarch64.zip, variant: gcc,   cc: gcc }
+          - { target: linux-aarch64, runs-on: ubuntu-24.04-arm, php_cli: php-cli-8.4-linux-aarch64-glibc.zip, tcc_zip: tcc-linux-aarch64.zip, variant: clang, cc: clang }
+          - { target: linux-aarch64, runs-on: ubuntu-24.04-arm, php_cli: php-cli-8.4-linux-aarch64-glibc.zip, tcc_zip: tcc-linux-aarch64.zip, variant: cross, 'cross-os': windows, 'cross-arch': x86_64, magic: '4d5a', mlen: 2 }
+          # ===== macos-aarch64 =====
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: tcc,   cc: tcc }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: gcc,   cc: gcc }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: clang, cc: clang }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: cross, 'cross-os': windows, 'cross-arch': x86_64, magic: '4d5a',     mlen: 2 }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: cross, 'cross-os': windows, 'cross-arch': i386,   magic: '4d5a',     mlen: 2 }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: cross, 'cross-os': linux,   'cross-arch': x86_64, magic: '7f454c46', mlen: 4 }
+          - { target: macos-aarch64, runs-on: macos-latest, php_cli: php-cli-8.4-macos-aarch64.zip, tcc_zip: tcc-macos-aarch64.zip, variant: cross, 'cross-os': linux,   'cross-arch': arm64,  magic: '7f454c46', mlen: 4 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 PHP CLI 与 TCC 包
+        shell: bash
+        run: |
+          set -e
+          mkdir -p tools build
+          curl -fsSL --retry 3 -o build/php-cli.zip "${{ env.PHP_REL }}/${{ matrix.php_cli }}"
+          curl -fsSL --retry 3 -o build/tcc.zip     "${{ env.TCC_BASE }}/${{ matrix.tcc_zip }}"
+
+      - name: 解压 PHP CLI（unix）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          unzip -q build/php-cli.zip -d tools/php
+          PHP_BIN=$(find tools/php -type f -name php | head -1)
+          test -n "$PHP_BIN"
+          chmod +x "$PHP_BIN"
+          echo "PHP_BIN=$PHP_BIN" >> "$GITHUB_ENV"
+
+      - name: 解压 PHP CLI（windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive build/php-cli.zip -DestinationPath tools/php
+          $php = (Get-ChildItem -Recurse tools/php -Filter php.exe | Select-Object -First 1).FullName
+          if (-not $php) { throw 'php.exe 未找到' }
+          "PHP_BIN=" + ($php -replace '\\', '/') >> $env:GITHUB_ENV
+
+      - name: 解压 TCC 包到仓库根（提供 tcc/ 交叉编译器，供源码模式定位）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          unzip -q build/tcc.zip -d .
+          chmod +x tcc/* 2>/dev/null || true
+          ls tcc
+
+      - name: 解压 TCC 包到仓库根（windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive build/tcc.zip -DestinationPath .
+          Get-ChildItem tcc | Select-Object Name
+
+      - name: 安装 gcc / clang（仅 windows 的 gcc/clang 测试）
+        if: ${{ runner.os == 'Windows' && contains(fromJSON('["gcc","clang"]'), matrix.cc) }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install mingw llvm -y
+          $paths = @('C:\tools\mingw64\bin', 'C:\tools\llvm\bin', 'C:\Program Files\LLVM\bin', 'C:\msys64\mingw64\bin')
+          foreach ($p in $paths) { if (Test-Path $p) { Add-Content $env:GITHUB_PATH $p } }
+
+      - name: 安装 C 编译器（linux 按需；ubuntu 仅预装 gcc，缺 clang）
+        if: ${{ runner.os == 'Linux' && contains(fromJSON('["gcc","clang"]'), matrix.cc) }}
+        shell: bash
+        run: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y gcc clang
+
+      - name: 原生编译 + 运行（tcc / gcc / clang）
+        if: ${{ matrix.cross-os == '' }}
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p build/scratch
+          cat > build/scratch/hello.php <<'EOF'
+          <?php
+          class Main
+          {
+              public function main(): void
+              {
+                  echo "TINY_OK", "\n";
+              }
+          }
+          EOF
+          cat > build/scratch/map.php <<'EOF'
+          <?php
+          class Main
+          {
+              public function main(): void
+              {
+                  map<string,int> $score = [];
+                  $score["alice"] = 95;
+                  $score["bob"] = 87;
+                  int $total = 0;
+                  foreach (array_keys($score) as $name) {
+                      $total = $total + $score[$name];
+                  }
+                  echo "SUM:", $total, "\n";
+              }
+          }
+          EOF
+          echo "===== hello (cc=${{ matrix.cc }}) ====="
+          out=$("$PHP_BIN" main.php run build/scratch/hello.php --cc ${{ matrix.cc }} -o build/scratch/hello 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "TINY_OK" || { echo "FAIL: hello 输出不含 TINY_OK"; exit 1; }
+          echo "===== map (cc=${{ matrix.cc }}) ====="
+          out=$("$PHP_BIN" main.php run build/scratch/map.php --cc ${{ matrix.cc }} -o build/scratch/map 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "SUM:182" || { echo "FAIL: map 输出不含 SUM:182"; exit 1; }
+          echo "OK: 原生编译运行通过 (cc=${{ matrix.cc }})"
+
+      - name: 交叉编译（仅编译 + 校验 magic）
+        if: ${{ matrix.cross-os != '' }}
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p build/scratch
+          cat > build/scratch/hello.php <<'EOF'
+          <?php
+          class Main
+          {
+              public function main(): void
+              {
+                  echo "TINY_OK", "\n";
+              }
+          }
+          EOF
+          echo "===== 交叉编译 ${{ matrix.cross-os }}/${{ matrix.cross-arch }}（tcc 交叉编译器）====="
+          "$PHP_BIN" main.php build build/scratch/hello.php -o build/scratch/hello -os ${{ matrix.cross-os }} -arch ${{ matrix.cross-arch }} --cc tcc
+          PROD="build/scratch/hello"
+          [ -f "$PROD.exe" ] && PROD="$PROD.exe"
+          [ -f "$PROD" ] || { echo "!! 未产出 $PROD"; exit 1; }
+          magic=$(od -An -tx1 -N ${{ matrix.mlen }} "$PROD" | tr -d ' \n')
+          echo "magic=$magic（期望 ${{ matrix.magic }}）"
+          [ "$magic" = "${{ matrix.magic }}" ] || { echo "FAIL: magic 不匹配，交叉编译产物无效"; exit 1; }
+          echo "OK: 交叉编译产物有效 (${{ matrix.cross-os }}/${{ matrix.cross-arch }})"

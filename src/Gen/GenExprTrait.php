@@ -946,8 +946,9 @@ trait GenExprTrait
             if ($arg instanceof VarExpr) {
                 return 'tphp_str_cref(&' . $this->varReadText($arg) . ')';
             }
-            // 字面量：tphp_str_lit 的 u.data 指向 .rodata，按值版安全
-            return 'tphp_str_c(' . $this->genExpr($arg) . ')';
+            // 非变量表达式（数组元素/属性/函数返回等）：先物化到临时再取地址。
+            // 按值版 tphp_str_c 对 SSO 短串会返回指向已销毁参数副本的悬垂指针。
+            return '({ String __cs = ' . $this->genExpr($arg) . '; (const char *)tphp_str_cref(&__cs); })';
         }
         // C 内存所有权：c_own 登记（函数出口自动 free）；cbuf 分配 + 登记
         if ($e->name === 'c_own') {
@@ -1081,7 +1082,7 @@ trait GenExprTrait
             return 'fputs(tphp_arr_get_bool(a, i) ? "true" : "false", stdout)';
         }
         if ($elem === Type::I_STRING) {
-            return '{ String __sv = tphp_arr_get_str(a, i); printf("\\"%.*s\\"", __sv.length, tphp_str_c(__sv)); }';
+            return '{ String __sv = tphp_arr_get_str(a, i); printf("\\"%.*s\\"", __sv.length, tphp_str_cref(&__sv)); }';
         }
         if ($this->table->isArray($elem)) {
             return $this->dumpFnFor($this->table->arrayElemOf($elem)) . '(tphp_arr_get_arr(a, i))';

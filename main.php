@@ -3,6 +3,21 @@
 declare(strict_types=1);
 
 /*
+ * Windows 控制台编码修复（必须在任何输出之前）。
+ * Windows 控制台默认使用 GBK/GB2312 等 OEM 代码页，而本工具的中文输出是 UTF-8 字节，
+ * 被按 GBK 解析就会产生「缂哄皯杈撳叆鏂囦欢」这类乱码。把控制台输出代码页切到
+ * UTF-8（65001）即可正确显示。sapi_windows_cp_set 底层调用 SetConsoleOutputCP；
+ * 再补一次 chcp 作为兜底，覆盖该函数未实际切换控制台代码页的旧 PHP 版本。
+ * 该块仅在 Windows 生效，非 Windows / 重定向到文件或管道时无副作用。
+ */
+if (PHP_OS_FAMILY === 'Windows') {
+    if (function_exists('sapi_windows_cp_set')) {
+        @sapi_windows_cp_set(65001);
+    }
+    @system('chcp 65001 >nul 2>&1');
+}
+
+/*
  * TinyPHP — 强类型 PHP 子集 → C 转译器。
  *
  * CLI 入口：解析参数后交给 Builder 串联完整流水线。

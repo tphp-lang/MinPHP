@@ -22,6 +22,7 @@ final class Pref
     public const TARGETS = [
         'windows' => ['x86_64', 'i386'],
         'linux' => ['x86_64', 'arm64'],
+        'darwin' => ['x86_64', 'arm64'],
     ];
 
     /**
@@ -256,7 +257,7 @@ TXT;
     --emit-c      只生成 C 源码，不调用 C 编译器
     --mem-stats   退出时打印内存分配/释放统计（leaks=N）
     --cc <name>   C 编译器：tcc（默认）/ gcc / clang
-    -os <name>    目标系统：windows（默认）/ linux
+    -os <name>    目标系统：windows / linux / darwin（macOS 宿主默认 darwin）
     -arch <name>  目标架构：x86_64（默认）/ i386(windows) / arm64(linux)
     --no-main     不生成 main()（库模式，供固件/宿主程序调用）
     --cflag <arg> 透传参数给 C 编译器（可多次使用）

@@ -13,11 +13,11 @@ use Tphp\Pref\Pref;
  * 默认用随包 TCC，按 **host × target** 选择二进制（TCC 的目标平台在编译 tcc 自身时
  * 由 TCC_TARGET_* 宏决定，交叉编译器是按目标命名的独立二进制，映射见 TCC.md）：
  *
- *   | host \ target        | windows x64        | windows i386            | linux x86_64     | linux arm64      |
- *   |----------------------|--------------------|-------------------------|------------------|------------------|
- *   | windows              | tcc/tcc.exe        | tcc/i386-win32-tcc.exe  | tcc/x86_64-tcc.exe | tcc/arm64-tcc.exe |
- *   | linux                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/tcc（仅同构） | tcc/tcc（仅同构） |
- *   | macOS                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/x86_64-tcc   | tcc/arm64-tcc    |
+ *   | host \ target        | windows x64         | windows i386            | linux x86_64     | linux arm64      | macOS（本机）     |
+ *   |----------------------|--------------------|-------------------------|------------------|------------------|------------------|
+ *   | windows              | tcc/tcc.exe        | tcc/i386-win32-tcc.exe  | tcc/x86_64-tcc.exe | tcc/arm64-tcc.exe | —                |
+ *   | linux                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/tcc（仅同构） | tcc/tcc（仅同构） | —                |
+ *   | macOS                | tcc/x86_64-win32-tcc | tcc/i386-win32-tcc    | tcc/x86_64-tcc   | tcc/arm64-tcc    | tcc/tcc（本机 Mach-O） |
  *
  * Windows/linux 交叉产物静态链接（musl / PE），不依赖目标机 libc；
  * 也可以 --cc gcc/clang 并用 --cflag 透传交叉参数。找不到随包 TCC 时**显式报错**
@@ -139,6 +139,15 @@ final class Cc
                 return $dir . '/tcc';
             }
             return $dir . ($pref->arch === 'arm64' ? '/arm64-tcc' . $suffix : '/x86_64-tcc' . $suffix);
+        }
+
+        if ($pref->os === 'darwin') {
+            // macOS 目标只能在 macOS 宿主上编译：随包原生 tcc 产出本机架构的 Mach-O
+            // （交叉编译器按目标命名，但 macOS 没有对应的交叉 tcc）。
+            if ($hostOs !== 'darwin') {
+                return self::noTcc($target, $hostOs, 'macOS 目标只能在 macOS 宿主上编译（需原生 tcc 产出 Mach-O）');
+            }
+            return $dir . '/tcc';
         }
 
         return self::noTcc($target, $hostOs, '不支持的目标系统');

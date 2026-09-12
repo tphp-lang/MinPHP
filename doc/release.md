@@ -37,11 +37,11 @@ tphp-<os>-<arch>/
 TCC 的目标平台在编译 tcc 自身时由 `TCC_TARGET_*` 宏决定（`-arch` 是被忽略的选项），交叉编译器是
 按目标命名的独立二进制（详见 `TCC.md`）。`Cc::tccBinary()` 的映射：
 
-| host \ target | windows x64 | windows i386 | linux x86_64 | linux arm64 |
-|---|---|---|---|---|
-| **windows** | `tcc/tcc.exe` | `tcc/i386-win32-tcc.exe` | `tcc/x86_64-tcc.exe` | `tcc/arm64-tcc.exe` |
-| **linux** | `tcc/x86_64-win32-tcc` | `tcc/i386-win32-tcc` | `tcc/tcc`（仅同构） | `tcc/tcc`（仅同构） |
-| **macOS** | `tcc/x86_64-win32-tcc` | `tcc/i386-win32-tcc` | `tcc/x86_64-tcc` | `tcc/arm64-tcc` |
+| host \ target | windows x64 | windows i386 | linux x86_64 | linux arm64 | macOS（本机） |
+|---|---|---|---|---|---|
+| **windows** | `tcc/tcc.exe` | `tcc/i386-win32-tcc.exe` | `tcc/x86_64-tcc.exe` | `tcc/arm64-tcc.exe` | — |
+| **linux** | `tcc/x86_64-win32-tcc` | `tcc/i386-win32-tcc` | `tcc/tcc`（仅同构） | `tcc/tcc`（仅同构） | — |
+| **macOS** | `tcc/x86_64-win32-tcc` | `tcc/i386-win32-tcc` | `tcc/x86_64-tcc` | `tcc/arm64-tcc` | `tcc/tcc`（本机 Mach-O） |
 
 找不到随包 TCC 时**显式报错**（不再退回 PATH）—— 发布包必须完整；需要别的编译器用 `--cc`。
 

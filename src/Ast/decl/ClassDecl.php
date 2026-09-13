@@ -22,4 +22,7 @@ final class ClassDecl extends Node
         /** @var list<UseTraitDecl> */
         public readonly array $useTraits = [],
     ) {}
+
+    /** 匿名类升格产生的合成类（诊断中显示为「匿名类」，不泄漏 `_anon_class_<n>` 内部名）。 */
+    public bool $isAnon = false;
 }

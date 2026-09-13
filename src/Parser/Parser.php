@@ -53,6 +53,12 @@ final class Parser
     /** @var list<string> #import 参数（包名） */
     private array $fileImports = [];
 
+    /** 匿名类升格产生的合成 ClassDecl（解析结束后并入 File->decls）。 @var list<object> */
+    private array $anonClassDecls = [];
+
+    /** 匿名类合成名序号（跨文件递增，保证全局唯一）。 */
+    private int $anonClassSeq = 0;
+
     /** 编译目标（平台条件编译 #if 求值用）。 */
     private string $targetOs = 'windows';
     private string $targetArch = 'x86_64';
@@ -89,7 +95,13 @@ final class Parser
             $this->fileNs = $namespace;
         }
 
-        $file = new File($path, $this->parseTopLevel(), $namespace, $this->fileIncludes, $this->fileCflags, $this->fileImports);
+        // 匿名类升格：解析期间收集的合成 ClassDecl 并入本文件声明列表
+        $this->anonClassDecls = [];
+        $decls = $this->parseTopLevel();
+        foreach ($this->anonClassDecls as $anonDecl) {
+            $decls[] = $anonDecl;
+        }
+        $file = new File($path, $decls, $namespace, $this->fileIncludes, $this->fileCflags, $this->fileImports);
         return $file;
     }
 
@@ -190,7 +202,7 @@ final class Parser
     /** 函数名：内置豁免 → use function 表 → 当前 ns 前缀。 */
     public function resolveFunctionName(string $name): string
     {
-        if ($name === 'len' || $name === 'var_dump' || str_contains($name, '\\')) {
+        if ($name === 'len' || $name === 'var_dump' || $name === 'unset' || str_contains($name, '\\')) {
             return $name;
         }
         if (isset($this->functionImports[$name])) {

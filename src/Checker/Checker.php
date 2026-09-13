@@ -18,6 +18,7 @@ use Tphp\Table\FnSymbol;
 use Tphp\Table\InterfaceSymbol;
 use Tphp\Table\Scope;
 use Tphp\Table\Table;
+use Tphp\Table\VarSymbol;
 use Tphp\Token\Pos;
 use Tphp\Type\Type;
 
@@ -219,6 +220,10 @@ final class Checker
         if ($src === Type::I_NULL) {
             return $this->table->isRefType($dst);
         }
+        // object 是「任意对象引用」的顶层类型：任意类/接口/object 均可赋给它
+        if ($dst === Type::I_OBJECT) {
+            return $this->table->isClass($src) || $this->table->isInterface($src) || $src === Type::I_OBJECT;
+        }
         // 空数组字面量可赋给任何 array<T>
         if ($src === Type::I_ARRAY && $this->table->isArray($dst)) {
             return true;
@@ -322,6 +327,75 @@ final class Checker
             }
         }
         return false;
+    }
+
+    /**
+     * 流敏感收窄：给定变量的静态类型与 `instanceof C` 中的具体类 code，
+     * 返回收窄后的具体类 code；不构成合法收窄时返回 null。
+     *
+     * 硬边界：只能收窄回具体类。
+     *  - object（顶层对象引用）→ 任意具体类：C 表示同为裸对象指针，零成本
+     *  - 类 K → K 自身或 K 的子类（实例集合的子集，无需运行期判定）
+     *  - 接口 I → 实现 I 的具体类（C 变量为接口胖指针，读取需 .obj 解包）
+     *  - 目标为接口：不做（class×interface → itab 需运行期查表，违反零运行时）
+     */
+    private function refinedClass(int $staticType, int $classCode): ?int
+    {
+        $target = $this->table->classByCode($classCode);
+        if ($target === null) {
+            return null; // 目标不是具体类（如接口）→ 不收窄
+        }
+        if ($this->table->isObject($staticType)) {
+            return $classCode;
+        }
+        if ($this->table->isClass($staticType)) {
+            $sc = $this->table->classByCode($staticType);
+            return $sc !== null && $target->isSubclassOf($sc) ? $classCode : null;
+        }
+        if ($this->table->isInterface($staticType)) {
+            $iface = $this->table->interfaceByCode($staticType);
+            return $iface !== null && $this->classImplements($target, $iface) ? $classCode : null;
+        }
+        return null;
+    }
+
+    /** 在当前作用域写入收窄影子（同名真实声明存在时不写，避免遮蔽真实符号）。 */
+    private function narrowVar(string $name, int $classCode, int $cStorageType, ?Pos $pos = null): void
+    {
+        $existing = $this->scope->vars[$name] ?? null;
+        if ($existing !== null && !$existing->narrowShadow) {
+            return;
+        }
+        $this->writeNarrow($name, $classCode, $cStorageType, $pos);
+    }
+
+    /** 无条件写入收窄影子（覆盖当前作用域同名符号），返回被覆盖的旧符号。
+     *  `$cStorageType` 记录该名字 C 变量的实际存储类型（原始静态类型），供 Gen 零成本转型。 */
+    private function writeNarrow(string $name, int $classCode, int $cStorageType, ?Pos $pos = null): ?VarSymbol
+    {
+        $old = $this->scope->vars[$name] ?? null;
+        $sym = new VarSymbol($name, $classCode, $pos);
+        $sym->narrowShadow = true;
+        $sym->ifaceCValue = $this->table->isInterface($cStorageType);
+        $sym->cStorageType = $cStorageType;
+        // 影子叠加在真实符号/外层影子之上：继承与存储布局相关的标记，避免丢失盒子/闭包信息
+        if ($old !== null) {
+            $sym->boxed = $old->boxed;
+            $sym->isCapture = $old->isCapture;
+            $sym->closureSig = $old->closureSig;
+            $sym->closureFn = $old->closureFn;
+        }
+        $this->scope->vars[$name] = $sym;
+        return $old;
+    }
+
+    /** 移除当前作用域的同名收窄影子（该名字为影子时才移除）。 */
+    private function clearNarrowShadow(string $name): void
+    {
+        $existing = $this->scope->vars[$name] ?? null;
+        if ($existing !== null && $existing->narrowShadow) {
+            unset($this->scope->vars[$name]);
+        }
     }
 
     /** == != 的可比较性。 */

@@ -94,6 +94,7 @@ enum TokenKind
     case KwMap;
     case KwCallable;
     case KwVoid;
+    case KwObject;
 
     // 标点
     case Lparen;
@@ -157,7 +158,7 @@ enum TokenKind
     {
         return match ($this) {
             self::KwInt, self::KwFloat, self::KwDouble, self::KwBool, self::KwString,
-            self::KwArray, self::KwMap, self::KwCallable, self::KwVoid, self::KwNull, self::Ident => true,
+            self::KwArray, self::KwMap, self::KwCallable, self::KwVoid, self::KwNull, self::KwObject, self::Ident => true,
             default => false,
         };
     }

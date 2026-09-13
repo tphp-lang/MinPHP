@@ -19,6 +19,8 @@ use Tphp\Ast\decl\TraitDecl;
 use Tphp\Ast\decl\UseTraitDecl;
 use Tphp\Ast\decl\Param;
 use Tphp\Ast\expr\IntLit;
+use Tphp\Ast\expr\NewExpr;
+use Tphp\Token\Pos;
 use Tphp\Token\Token;
 use Tphp\Token\TokenKind;
 
@@ -572,6 +574,44 @@ trait ParserDeclTrait
         return $decl;
     }
 
+    /**
+     * 匿名类表达式 `new class [(args)] [extends X] implements A [, B ...] { members }`
+     * （`class` 已由调用方确认，尚未消费）。
+     *
+     * 「升格」：Parser 就地构造一个合成命名的普通 ClassDecl，NewExpr 引用其合成名；
+     * 下游（Checker / Gen）与普通 `new 类名(...)` 走同一通路。
+     * 强制 `implements`：匿名类 = 就地写的接口实现，必须至少实现一个具名接口。
+     */
+    private function parseAnonClass(): NewExpr
+    {
+        $classTok = $this->expect(TokenKind::KwClass, "'class'");
+        $args = [];
+        if ($this->match(TokenKind::Lparen)) {
+            $args = $this->parseArgs();
+        }
+        $extends = $this->match(TokenKind::KwExtends)
+            ? $this->resolveClassName($this->parseQualifiedName())
+            : null;
+        $implements = [];
+        if ($this->match(TokenKind::KwImplements)) {
+            do {
+                $implements[] = $this->resolveClassName($this->parseQualifiedName());
+            } while ($this->match(TokenKind::Comma));
+        }
+        if ($implements === []) {
+            $this->errHere('匿名类必须 implements 至少一个接口（匿名类 = 就地的接口实现；本语言没有 object 那样的万能擦除写头）');
+        }
+        $this->expect(TokenKind::Lbrace, "'{'");
+        [$props, $methods, $classConsts, $useTraits] = $this->parseMemberList();
+        $this->expect(TokenKind::Rbrace, "'}'");
+        $name = '_anon_class_' . (++$this->anonClassSeq);
+        $decl = new ClassDecl($name, $extends, $props, $methods, $classConsts, $implements, false, false, $useTraits);
+        $decl->pos = $classTok->pos;
+        $decl->isAnon = true;
+        $this->anonClassDecls[] = $decl;
+        return new NewExpr($name, $args);
+    }
+
     /** trait 声明（成员语法与类一致，含嵌套 use）。 */
     private function parseTraitRest(): object
     {
@@ -770,6 +810,7 @@ trait ParserDeclTrait
             TokenKind::KwString => 'string',
             TokenKind::KwCallable => 'callable',
             TokenKind::KwVoid => 'void',
+            TokenKind::KwObject => 'object',
             TokenKind::KwSelf => 'self', // : self 链式返回（Checker 解析为声明类）
             TokenKind::KwNull => 'null', // null 类型 = C 的 void*
             default => null,

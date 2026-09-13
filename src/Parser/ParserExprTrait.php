@@ -484,6 +484,9 @@ trait ParserExprTrait
                 return $this->at(new NameExpr($t->kind === TokenKind::KwSelf ? 'self' : 'parent'), $t->pos);
             case TokenKind::KwNew:
                 $this->next();
+                if ($this->is(TokenKind::KwClass)) {
+                    return $this->at($this->parseAnonClass(), $t->pos);
+                }
                 $class = $this->resolveClassName($this->parseQualifiedName());
                 $this->expect(TokenKind::Lparen, "'('");
                 $args = $this->parseArgs();

@@ -27,6 +27,7 @@ final class Type
     public const I_CALLABLE = 8;
     public const I_NULL = 9;      // null 字面量的类型，只能赋给引用类型
     public const I_CVAL = 10;     // c-> 调用/常量的返回：C 侧值（类型由程序员保证）
+    public const I_OBJECT = 11;   // object：裸对象指针 TphpObjHead*（未收窄处不可成员访问）
 
     /** 类类型索引从这里开始分配 */
     public const I_CLASS_BASE = 16;
@@ -91,6 +92,7 @@ final class Type
         self::I_ARRAY => 'array',
         self::I_CALLABLE => 'callable',
         self::I_NULL => 'null',
+        self::I_OBJECT => 'object',
     ];
 
     /** 命名空间分隔符内联进 C 符号：Lib\Calc → Lib_Calc。 */

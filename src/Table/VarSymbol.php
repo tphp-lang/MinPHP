@@ -27,6 +27,15 @@ final class VarSymbol
     /** 闭包捕获进入的变量（非本作用域声明，禁止再被引用捕获） */
     public bool $isCapture = false;
 
+    /** 收窄影子：这是流敏感收窄写入的同名符号，而非真实声明（分支退出即随作用域丢弃） */
+    public bool $narrowShadow = false;
+
+    /** 该名字对应的 C 变量实际是接口胖指针 TphpIface（即使静态类型已收窄为具体类，读取需 .obj 解包） */
+    public bool $ifaceCValue = false;
+
+    /** 收窄影子对应 C 变量的**实际存储类型**（原始静态类型）：Gen 依此决定是否零成本转型回具体类指针 */
+    public int $cStorageType = 0;
+
     public function __construct(
         public readonly string $name,
         public int $type = 0,

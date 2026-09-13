@@ -235,6 +235,13 @@ trait GenExprTrait
         if ($this->table->isClass($elem)) {
             return 'tphp_arr_push_obj(' . $arr . ', ' . $value . ')';
         }
+        if ($this->table->isObject($elem)) {
+            // object 元素复用对象指针通路；接口值需先取 .obj 解包
+            if ($item !== null && $this->needsIfaceUnwrap($item, $elem)) {
+                $value = $this->genIfaceUnwrap($value);
+            }
+            return 'tphp_arr_push_obj(' . $arr . ', ' . $value . ')';
+        }
         if ($item !== null && $this->needsIfaceWrap($item, $elem)) {
             $value = $this->genIfaceWrap($item, $value, $elem);
         }
@@ -282,6 +289,9 @@ trait GenExprTrait
         if ($this->table->isClass($elem)) {
             $struct = Names::classStruct($this->table->className($elem));
             return '((' . $struct . '*)tphp_arr_get_obj(' . $base . ', ' . $idx . '))';
+        }
+        if ($this->table->isObject($elem)) {
+            return '((' . $this->elemCType($elem) . ')tphp_arr_get_obj(' . $base . ', ' . $idx . '))';
         }
         // c.* 标量：语句表达式读取
         $ctype = $this->elemCType($elem);
@@ -659,12 +669,21 @@ trait GenExprTrait
     {
         $cap = $this->capLookup($e->name);
         if ($cap !== null) {
-            return $cap;
+            $text = $cap;
+        } elseif ($e->sym !== null && $this->isBoxedSym($e->sym)) {
+            $text = '(*' . Names::localVar($e->name) . '_box)';
+        } else {
+            $text = Names::localVar($e->name);
         }
-        if ($e->sym !== null && $this->isBoxedSym($e->sym)) {
-            return '(*' . Names::localVar($e->name) . '_box)';
+        // 接口胖指针收窄为具体类：C 变量实际是 TphpIface，零成本读取 .obj 并转回类指针
+        if ($e->ifaceUnwrap) {
+            return '((' . $this->cType($e->type) . ')((' . $text . ').obj))';
         }
-        return Names::localVar($e->name);
+        // 类/object 收窄为子类：C 变量静态类型较宽（父类指针 / 裸对象指针），零成本转型回具体类指针
+        if ($e->narrowCast) {
+            return '((' . $this->cType($e->type) . ')(' . $text . '))';
+        }
+        return $text;
     }
 
     /** $this：闭包内重映射为 env->self。 */
@@ -698,6 +717,22 @@ trait GenExprTrait
         return $this->genExpr($e);
     }
 
+    private function genUnsetStmt(CallExpr $e): void
+    {
+        foreach ($e->args as $arg) {
+            $ft = $arg->type;
+            $lv = $this->genLValue($arg);      // PropFetch: 生成接收者空指针检查行 + 返回左值文本
+            $this->rcUnrefStmt($lv, $ft);      // 先释放旧值
+            if ($this->table->isInterface($ft)) {
+                $this->w($lv . ' = (TphpIface){ NULL, NULL };');
+            } elseif ($this->table->isCallable($ft)) {
+                $this->w($lv . ' = (Callable){0};');
+            } else {
+                $this->w($lv . ' = NULL;');
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ 赋值
 
     private function genAssign(AssignExpr $e): string
@@ -719,7 +754,7 @@ trait GenExprTrait
 
         // $a[i] = v：普通下标写入（带越界检查；hoist 临时由语句尾统一释放）
         if ($target instanceof IndexExpr) {
-            return $this->setElemCall($target, $value) . ';';
+            return $this->setElemCall($target, $value, $e->value) . ';';
         }
 
         if ($e->op === TokenKind::Eq) {
@@ -729,6 +764,14 @@ trait GenExprTrait
             if ($this->table->isClass($e->type) && $this->table->isClass($e->value->type)
                 && $e->type !== $e->value->type) {
                 $value = '(' . $this->cType($e->type) . ')(' . $value . ')';
+            }
+            // 类 → object：零成本指针转型（对象头位于偏移 0）
+            if ($this->table->isObject($e->type) && $this->table->isClass($e->value->type)) {
+                $value = '(' . $this->cType($e->type) . ')(' . $value . ')';
+            }
+            // 接口 → object：取胖指针的 .obj 解包
+            if ($this->needsIfaceUnwrap($e->value, $e->type)) {
+                $value = $this->genIfaceUnwrap($value);
             }
             // 类 → 接口：包 itab 胖指针
             if ($this->needsIfaceWrap($e->value, $e->type)) {
@@ -798,7 +841,7 @@ trait GenExprTrait
     }
 
     /** 下标写入调用文本（带越界检查）。 */
-    private function setElemCall(IndexExpr $target, string $value): string
+    private function setElemCall(IndexExpr $target, string $value, ?Expr $valueExpr = null): string
     {
         if ($this->table->isMap($target->base->type)) {
             return $this->mapSetCall($target, $value);
@@ -825,6 +868,12 @@ trait GenExprTrait
             return 'tphp_arr_set_arr(' . $base . ', ' . $idx . ', ' . $value . ')';
         }
         if ($this->table->isClass($elem)) {
+            return 'tphp_arr_set_obj(' . $base . ', ' . $idx . ', ' . $value . ')';
+        }
+        if ($this->table->isObject($elem)) {
+            if ($valueExpr !== null && $this->needsIfaceUnwrap($valueExpr, $elem)) {
+                $value = $this->genIfaceUnwrap($value);
+            }
             return 'tphp_arr_set_obj(' . $base . ', ' . $idx . ', ' . $value . ')';
         }
         // c.* 标量元素
@@ -919,6 +968,9 @@ trait GenExprTrait
 
     private function genCall(CallExpr $e): string
     {
+        if ($e->name === 'unset') {
+            return '0'; // unset 是语句构造；表达式位置由 Checker(返回 void)拦截，这里仅兜底避免非法 C
+        }
         // 内置函数
         if ($e->name === 'len') {
             // 新鲜堆值实参先入临时（len 不持有，语句尾释放）
@@ -1105,6 +1157,9 @@ trait GenExprTrait
                 : $this->genExpr($arg);
             if ($paramTypes !== null && isset($paramTypes[$i]) && $this->needsIfaceWrap($arg, $paramTypes[$i])) {
                 $text = $this->genIfaceWrap($arg, $text, $paramTypes[$i]);
+            }
+            if ($paramTypes !== null && isset($paramTypes[$i]) && $this->needsIfaceUnwrap($arg, $paramTypes[$i])) {
+                $text = $this->genIfaceUnwrap($text);
             }
             $texts[] = $text;
         }
@@ -1302,6 +1357,18 @@ trait GenExprTrait
     private function needsIfaceWrap(Expr $value, int $targetType): bool
     {
         return $this->table->isInterface($targetType) && $this->table->isClass($value->type);
+    }
+
+    /** 接口 → object 需要取胖指针的 `.obj`（对象指针）。 */
+    private function needsIfaceUnwrap(Expr $value, int $targetType): bool
+    {
+        return $this->table->isObject($targetType) && $this->table->isInterface($value->type);
+    }
+
+    /** 零成本读取接口胖指针的 `.obj` 字段，得到裸对象指针。 */
+    private function genIfaceUnwrap(string $text): string
+    {
+        return '(' . $text . ').obj';
     }
 
     private function genCast(CastExpr $e): string

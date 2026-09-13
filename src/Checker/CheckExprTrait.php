@@ -48,6 +48,7 @@ use Tphp\Ast\stmt\BreakStmt;
 use Tphp\Ast\stmt\ContinueStmt;
 use Tphp\Ast\stmt\ExprStmt;
 use Tphp\Ast\stmt\ReturnStmt;
+use Tphp\Ast\stmt\ThrowStmt;
 use Tphp\Type\Type;
 use Tphp\Token\TokenKind;
 
@@ -111,7 +112,10 @@ trait CheckExprTrait
         }
         if ($e instanceof TernaryExpr) {
             $this->requireBool($e->cond, '三元表达式条件');
+            // then 分支在条件为真时求值：可据条件中的 instanceof 事实收窄
+            $saved = $this->applyFacts($this->narrowFacts($e->cond));
             $tt = $this->checkExpr($e->then);
+            $this->restoreFacts($saved);
             $et = $this->checkExpr($e->else);
             $common = $this->commonType($tt, $et);
             if ($common === Type::NONE) {
@@ -293,6 +297,8 @@ trait CheckExprTrait
         }
         $this->gateClosureVar($e->name, $e->pos);
         $e->sym = $sym;
+        $e->ifaceUnwrap = $sym->ifaceCValue;
+        $e->narrowCast = $sym->narrowShadow && $sym->cStorageType !== $sym->type;
         return $sym->type;
     }
 
@@ -670,7 +676,7 @@ trait CheckExprTrait
     private function checkInstanceOf(InstanceOfExpr $e): int
     {
         $objT = $this->checkExpr($e->obj);
-        if (!$this->table->isClass($objT) && !$this->table->isInterface($objT)) {
+        if (!$this->table->isClass($objT) && !$this->table->isInterface($objT) && !$this->table->isObject($objT)) {
             $this->error(
                 'instanceof 左侧必须是对象（得到 ' . $this->table->displayName($objT) . '）',
                 $e->obj->pos,
@@ -704,6 +710,10 @@ trait CheckExprTrait
     {
         $objIsClass = $this->table->isClass($objT);
         $objIsIface = $this->table->isInterface($objT);
+
+        if ($this->table->isObject($objT)) {
+            return null; // object 的底层具体类编译期未知 → 运行时判定
+        }
 
         if ($cls !== null) {
             if ($objT === $cls->code) {
@@ -744,6 +754,114 @@ trait CheckExprTrait
             return null;
         }
         return null;
+    }
+
+    // -------------------------------------------------------------- 流敏感收窄
+
+    /**
+     * 从 `$x instanceof C` 提取「收窄事实」。
+     * 仅当 C 为具体类（非接口/未定义/trait）且与 $x 当前静态类型构成合法收窄（`refinedClass`）时成立。
+     *
+     * @return array{name:string,class:int,cStorageType:int,pos:Pos}|null
+     */
+    private function instanceofFact(Expr $e): ?array
+    {
+        if (!$e instanceof InstanceOfExpr || !$e->obj instanceof VarExpr) {
+            return null;
+        }
+        $cls = $this->table->classes[$e->class] ?? null;
+        if ($cls === null) {
+            return null; // 右侧为接口 / 未定义 / trait：不收窄（硬边界）
+        }
+        $sym = $this->scope->find($e->obj->name);
+        if ($sym === null) {
+            return null;
+        }
+        $refined = $this->refinedClass($sym->type, $cls->code);
+        if ($refined === null) {
+            return null;
+        }
+        // 存储类型取原始声明类型：影子叠加时沿用外层的存储类型（C 变量未变）
+        return [
+            'name' => $e->obj->name,
+            'class' => $refined,
+            'cStorageType' => $sym->narrowShadow ? $sym->cStorageType : $sym->type,
+            'pos' => $e->obj->pos,
+        ];
+    }
+
+    /**
+     * 从条件表达式提取「正向收窄事实」。
+     * 递归分解 `&&`（左右并集）；`!` / `||` / 三元不产生正向事实。
+     *
+     * @return list<array{name:string,class:int,cStorageType:int,pos:Pos}>
+     */
+    private function narrowFacts(Expr $cond): array
+    {
+        if ($cond instanceof BinaryExpr && $cond->op === TokenKind::AndAnd) {
+            return array_merge($this->narrowFacts($cond->left), $this->narrowFacts($cond->right));
+        }
+        $fact = $this->instanceofFact($cond);
+        return $fact === null ? [] : [$fact];
+    }
+
+    /**
+     * 从条件表达式提取「否定收窄事实」：形如 `!($x instanceof C)` 时，
+     * 条件为假 ⇒ $x 必为具体类 C（供守卫子句在 if 之后收窄）。其它形态返回 null。
+     *
+     * @return array{name:string,class:int,cStorageType:int,pos:Pos}|null
+     */
+    private function negativeNarrowFact(Expr $cond): ?array
+    {
+        if ($cond instanceof UnaryExpr && $cond->op === TokenKind::Not) {
+            return $this->instanceofFact($cond->expr);
+        }
+        return null;
+    }
+
+    /**
+     * 在**当前作用域**写入收窄事实，返回被覆盖的旧符号表。
+     * 有语句作用域处（if/while/for 体）依托子作用域自然失效，无需回退；
+     * 无语句作用域处（`&&` 右侧、三元 then）需成对 `restoreFacts` 回退。
+     */
+    private function applyFacts(array $facts): array
+    {
+        $saved = [];
+        foreach ($facts as $f) {
+            if (array_key_exists($f['name'], $saved)) {
+                continue; // 同段内同名事实只保存一次原始符号
+            }
+            $saved[$f['name']] = $this->writeNarrow($f['name'], $f['class'], $f['cStorageType'], $f['pos']);
+        }
+        return $saved;
+    }
+
+    /** 回退 `applyFacts` 写入的收窄影子（恢复原符号或删除）。 */
+    private function restoreFacts(array $saved): void
+    {
+        foreach ($saved as $name => $old) {
+            if ($old === null) {
+                unset($this->scope->vars[$name]);
+            } else {
+                $this->scope->vars[$name] = $old;
+            }
+        }
+    }
+
+    /**
+     * 语句序列按控制流是否「必然终止」（所有路径以 return / throw / break / continue 结束）。
+     * 至少覆盖「最后一条语句即上述之一」的常见形态，供守卫子句收窄使用。
+     */
+    private function alwaysTerminates(array $stmts): bool
+    {
+        if ($stmts === []) {
+            return false;
+        }
+        $last = $stmts[count($stmts) - 1];
+        return $last instanceof ReturnStmt
+            || $last instanceof ThrowStmt
+            || $last instanceof BreakStmt
+            || $last instanceof ContinueStmt;
     }
 
     private function checkIndex(IndexExpr $e): int
@@ -798,6 +916,20 @@ trait CheckExprTrait
     private function checkBinary(BinaryExpr $e): int
     {
         $op = $e->op;
+
+        if ($op === TokenKind::AndAnd) {
+            // 短路：右侧仅在左侧为真时求值，可用左侧的 instanceof 事实收窄后再检查右侧
+            $lt = $this->checkExpr($e->left);
+            $saved = $this->applyFacts($this->narrowFacts($e->left));
+            $rt = $this->checkExpr($e->right);
+            $this->restoreFacts($saved);
+            if ($this->table->isBool($lt) && $this->table->isBool($rt)) {
+                return Type::I_BOOL;
+            }
+            $this->error('逻辑运算只支持 bool', $e->pos);
+            return Type::NONE;
+        }
+
         $lt = $this->checkExpr($e->left);
         $rt = $this->checkExpr($e->right);
         $table = $this->table;
@@ -859,7 +991,6 @@ trait CheckExprTrait
                 $this->error('关系比较只支持数值与字符串', $e->pos);
                 return Type::NONE;
 
-            case TokenKind::AndAnd:
             case TokenKind::OrOr:
                 if ($table->isBool($lt) && $table->isBool($rt)) {
                     return Type::I_BOOL;
@@ -963,6 +1094,11 @@ trait CheckExprTrait
     private function checkAssign(AssignExpr $e): int
     {
         $target = $e->target;
+
+        // 赋值即失效：该变量此前若处于收窄态，赋值后不再成立
+        if ($target instanceof VarExpr) {
+            $this->clearNarrowShadow($target->name);
+        }
 
         // 未定义变量的首次赋值 = 类型推断声明（PHP 类型；C 类型必须显式声明）
         if ($e->op === TokenKind::Eq && $target instanceof VarExpr
@@ -1115,6 +1251,7 @@ trait CheckExprTrait
             }
             $this->gateClosureVar($t->name, $t->pos);
             $t->sym = $sym;
+            $t->ifaceUnwrap = $sym->ifaceCValue;
             return $sym->type;
         }
 
@@ -1200,10 +1337,14 @@ trait CheckExprTrait
         }
 
         if (!$this->table->isClass($ot)) {
-            $this->error(
-                $this->table->displayName($ot) . ' 类型没有属性 $' . $e->name,
-                $e->pos,
-            );
+            if ($this->table->isObject($ot)) {
+                $this->error('object 类型无属性布局，请先用 instanceof 收窄到具体类再访问 $' . $e->name, $e->pos);
+            } else {
+                $this->error(
+                    $this->table->displayName($ot) . ' 类型没有属性 $' . $e->name,
+                    $e->pos,
+                );
+            }
             return Type::NONE;
         }
         $class = $this->table->classByCode($ot);
@@ -1217,15 +1358,15 @@ trait CheckExprTrait
         }
         $prop = $class->findProp($e->name);
         if ($prop === null) {
-            $this->error("类 {$class->name} 没有属性 \${$e->name}", $e->pos);
+            $this->error("类 {$this->clsLabel($class)} 没有属性 \${$e->name}", $e->pos);
             return Type::NONE;
         }
         if ($prop->isStatic) {
-            $this->error("静态属性请用 {$class->name}::\${$e->name} 访问", $e->pos);
+            $this->error("静态属性请用 {$this->clsLabel($class)}::\${$e->name} 访问", $e->pos);
             return Type::NONE;
         }
         if (!$this->canAccess($prop->owner, $prop->vis)) {
-            $this->error("无法访问 {$prop->owner->name} 的 {$prop->vis} 属性 \${$e->name}", $e->pos);
+            $this->error("无法访问 {$this->clsLabel($prop->owner)} 的 {$prop->vis} 属性 \${$e->name}", $e->pos);
             return Type::NONE;
         }
         return $prop->type;
@@ -1283,7 +1424,7 @@ trait CheckExprTrait
         }
         $prop = $class->findProp($e->name);
         if ($prop === null) {
-            $this->error("类 {$class->name} 没有属性 \${$e->name}", $e->pos);
+            $this->error("类 {$this->clsLabel($class)} 没有属性 \${$e->name}", $e->pos);
             return Type::NONE;
         }
         if (!$prop->isStatic) {
@@ -1291,7 +1432,7 @@ trait CheckExprTrait
             return Type::NONE;
         }
         if (!$this->canAccess($prop->owner, $prop->vis)) {
-            $this->error("无法访问 {$prop->owner->name} 的 {$prop->vis} 属性 \${$e->name}", $e->pos);
+            $this->error("无法访问 {$this->clsLabel($prop->owner)} 的 {$prop->vis} 属性 \${$e->name}", $e->pos);
             return Type::NONE;
         }
         return $prop->type;
@@ -1372,6 +1513,34 @@ trait CheckExprTrait
                 $this->error('c_own() 需要指针参数（c-> 调用返回值）', $e->pos);
             }
             return Type::I_CVAL;
+        }
+
+        if ($fn->name === 'unset') {
+            if (count($e->args) === 0) {
+                $this->error('unset() 至少需要一个参数', $e->pos);
+                return Type::I_VOID;
+            }
+            foreach ($e->args as $arg) {
+                if (!$arg instanceof PropFetch) {
+                    $this->checkExpr($arg); // 仍做类型检查，尽量多报错
+                    $this->error('unset() 只支持对象属性（$obj->prop）', $arg->pos);
+                    continue;
+                }
+                $ot = $this->checkExpr($arg->obj);
+                if (!$this->table->isClass($ot)) {
+                    $this->error('unset() 只支持对象属性（$obj->prop）', $arg->pos);
+                    continue;
+                }
+                $ft = $this->resolveProp($arg);
+                $arg->type = $ft;
+                if ($ft === Type::NONE) {
+                    continue;
+                }
+                if (!$this->table->isRefType($ft)) {
+                    $this->error("字段 \${$arg->name} 是值类型（{$this->table->displayName($ft)}），无法 unset（仅 array/类/接口 字段可 unset 为 null）", $arg->pos);
+                }
+            }
+            return Type::I_VOID;
         }
 
         if ($fn->name === 'implode') {
@@ -1542,10 +1711,14 @@ trait CheckExprTrait
         }
 
         if (!$this->table->isClass($ot)) {
-            $this->error(
-                $this->table->displayName($ot) . ' 类型不能调用方法 ->' . $e->name . '()',
-                $e->pos,
-            );
+            if ($this->table->isObject($ot)) {
+                $this->error('object 类型无方法布局，请先用 instanceof 收窄到具体类再调用 ->' . $e->name . '()', $e->pos);
+            } else {
+                $this->error(
+                    $this->table->displayName($ot) . ' 类型不能调用方法 ->' . $e->name . '()',
+                    $e->pos,
+                );
+            }
             foreach ($e->args as $arg) {
                 $this->checkExpr($arg);
             }
@@ -1554,17 +1727,17 @@ trait CheckExprTrait
         $class = $this->table->classByCode($ot);
         $fn = $class->findMethod($e->name);
         if ($fn === null) {
-            $this->error("类 {$class->name} 没有方法 {$e->name}()", $e->pos);
+            $this->error("类 {$this->clsLabel($class)} 没有方法 {$e->name}()", $e->pos);
             foreach ($e->args as $arg) {
                 $this->checkExpr($arg);
             }
             return Type::NONE;
         }
         if ($fn->isStatic) {
-            $this->error("静态方法请用 {$class->name}::{$e->name}() 调用", $e->pos);
+            $this->error("静态方法请用 {$this->clsLabel($class)}::{$e->name}() 调用", $e->pos);
         }
         if (!$this->canAccess($fn->ownerClass, $fn->vis)) {
-            $this->error("无法访问 {$fn->ownerClass->name} 的 {$fn->vis} 方法 {$e->name}()", $e->pos);
+            $this->error("无法访问 {$this->clsLabel($fn->ownerClass)} 的 {$fn->vis} 方法 {$e->name}()", $e->pos);
         }
         // 动态分发保守集：接收者类 + 全部子类的最近实现（运行时实际可能执行的符号）
         if ($this->curFn !== null) {
@@ -1590,7 +1763,7 @@ trait CheckExprTrait
         }
         $fn = $class->findMethod($e->method);
         if ($fn === null) {
-            $this->error("类 {$class->name} 没有方法 {$e->method}()", $e->pos);
+            $this->error("类 {$this->clsLabel($class)} 没有方法 {$e->method}()", $e->pos);
             foreach ($e->args as $arg) {
                 $this->checkExpr($arg);
             }

@@ -38,11 +38,20 @@ trait CheckStmtTrait
         }
     }
 
-    /** 在新的子作用域中检查语句序列。 */
-    private function checkStmtsScoped(array $stmts): void
+    /**
+     * 在新的子作用域中检查语句序列。
+     * `$facts` 为该分支/循环体成立时的流敏感收窄事实，仅在子作用域内生效。
+     *
+     * @param list<Stmt> $stmts
+     * @param list<array{name:string,class:int,cStorageType:int,pos:\Tphp\Token\Pos}> $facts
+     */
+    private function checkStmtsScoped(array $stmts, array $facts = []): void
     {
         $saved = $this->scope;
         $this->scope = new Scope($saved, $saved->fn);
+        if ($facts !== []) {
+            $this->applyFacts($facts);
+        }
         $this->checkStmts($stmts);
         $this->scope = $saved;
     }
@@ -69,22 +78,32 @@ trait CheckStmtTrait
 
         if ($s instanceof IfStmt) {
             $this->requireBool($s->cond, 'if 条件');
-            $this->checkStmtsScoped($s->then);
+            // then 分支：条件为真 ⇒ 条件中的 instanceof 事实成立，仅在该子作用域内生效
+            $this->checkStmtsScoped($s->then, $this->narrowFacts($s->cond));
+            // else 分支：条件为假不产生正向收窄
             if ($s->else !== null) {
                 $this->checkStmtsScoped($s->else);
+            }
+            // 守卫子句：if (!($x instanceof C)) { return/throw/...; } ⇒ 其后 $x 收窄为 C
+            $neg = $this->negativeNarrowFact($s->cond);
+            if ($neg !== null && $this->alwaysTerminates($s->then)) {
+                $this->writeNarrow($neg['name'], $neg['class'], $neg['cStorageType'], $neg['pos']);
             }
             return;
         }
 
         if ($s instanceof WhileStmt) {
             $this->requireBool($s->cond, 'while 条件');
+            // 每轮都以条件为真进入循环体 ⇒ 条件中的 instanceof 事实在体内成立
+            $facts = $this->narrowFacts($s->cond);
             $this->loopDepth++;
-            $this->checkStmtsScoped($s->body);
+            $this->checkStmtsScoped($s->body, $facts);
             $this->loopDepth--;
             return;
         }
 
         if ($s instanceof DoWhileStmt) {
+            // 循环体先于条件执行：首轮进入时条件未必成立，故不做收窄
             $this->loopDepth++;
             $this->checkStmtsScoped($s->body);
             $this->loopDepth--;
@@ -103,6 +122,10 @@ trait CheckStmtTrait
             }
             if ($s->post !== null) {
                 $this->checkExpr($s->post);
+            }
+            // init/post 已检查完毕；条件为真才进入循环体 ⇒ 条件中的 instanceof 事实应用到体内
+            if ($s->cond !== null) {
+                $this->applyFacts($this->narrowFacts($s->cond));
             }
             $this->loopDepth++;
             $this->checkStmts($s->body);

@@ -232,6 +232,9 @@ trait CheckDeclTrait
                     continue;
                 }
                 $sym = new ClassSymbol($fq, $this->table->allocClassCode(), null, $decl->pos);
+                if ($decl->isAnon) {
+                    $sym->displayName = '匿名类';
+                }
                 $this->table->addClass($sym);
                 $this->registerCSymbol('tphp_class_' . Type::mangleName($fq), $fq, $decl->pos);
             }
@@ -503,6 +506,12 @@ trait CheckDeclTrait
         return $out;
     }
 
+    /** 诊断用的类名（匿名类显示为「匿名类」，不泄漏合成名）。 */
+    private function clsLabel(ClassSymbol $sym): string
+    {
+        return $sym->displayName ?? $sym->name;
+    }
+
     private function validateImplements(ClassSymbol $sym): void
     {
         foreach ($this->requiredInterfaces($sym) as $iface) {
@@ -510,14 +519,14 @@ trait CheckDeclTrait
                 $fn = $sym->findMethod($name);
                 if ($fn === null) {
                     $this->error(
-                        "类 {$sym->name} 实现接口 {$iface->name} 缺少方法 {$name}()",
+                        "类 {$this->clsLabel($sym)} 实现接口 {$iface->name} 缺少方法 {$name}()",
                         $sig->pos,
                     );
                     continue;
                 }
                 if (!$this->signaturesMatch($fn, $sig)) {
                     $this->error(
-                        "类 {$sym->name} 的 {$name}() 签名与接口 {$iface->name} 不一致",
+                        "类 {$this->clsLabel($sym)} 的 {$name}() 签名与接口 {$iface->name} 不一致",
                         $fn->pos,
                     );
                 }
@@ -541,7 +550,7 @@ trait CheckDeclTrait
     private function registerClassConst(ClassSymbol $sym, object $cc): void
     {
         if (isset($sym->consts[$cc->name])) {
-            $this->error("类常量 '{$cc->name}' 在类 {$sym->name} 中重复定义", $cc->typeRef->pos);
+            $this->error("类常量 '{$cc->name}' 在类 {$this->clsLabel($sym)} 中重复定义", $cc->typeRef->pos);
             return;
         }
         if ($sym->findConst($cc->name) !== null) {
@@ -564,7 +573,7 @@ trait CheckDeclTrait
     private function registerProp(ClassSymbol $sym, object $prop): void
     {
         if (isset($sym->props[$prop->name])) {
-            $this->error("属性 '{$prop->name}' 在类 {$sym->name} 中重复定义", $prop->typeRef->pos);
+            $this->error("属性 '{$prop->name}' 在类 {$this->clsLabel($sym)} 中重复定义", $prop->typeRef->pos);
             return;
         }
         if ($sym->findProp($prop->name) !== null) {
@@ -618,7 +627,7 @@ trait CheckDeclTrait
         }
         if ($missing !== [] && !$sym->isAbstract) {
             $this->error(
-                "类 {$sym->name} 有未实现的抽象方法：" . implode('、', $missing)
+                "类 {$this->clsLabel($sym)} 有未实现的抽象方法：" . implode('、', $missing)
                 . '（需实现全部抽象方法，或将类声明为 abstract）',
                 $sym->pos,
             );
@@ -627,7 +636,7 @@ trait CheckDeclTrait
 
     private function registerMethod(ClassSymbol $sym, object $method): void
     {        if (isset($sym->methods[$method->name])) {
-            $this->error("方法 '{$method->name}' 在类 {$sym->name} 中重复定义", $method->ret?->pos);
+            $this->error("方法 '{$method->name}' 在类 {$this->clsLabel($sym)} 中重复定义", $method->ret?->pos);
             return;
         }
         $fn = new FnSymbol(

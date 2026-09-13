@@ -6,7 +6,8 @@ namespace Tphp\Table;
 
 /**
  * 词法作用域：父链式查找，同层禁止重复声明。
- * Checker 构建并校验，Gen 复用同一棵树做 C 局部变量声明。
+ * 仅供 Checker 构建并校验类型；Gen 不复用此树——其 C 局部变量声明由 AST 节点驱动，
+ * 引用计数的存活/清理另用 Gen 自身的 rcScopes（见 src/Gen/GenRcTrait.php）。
  */
 final class Scope
 {

@@ -57,6 +57,7 @@ param       = type, var, ["=", literal] ;
 type        = "int" | "float" | "double" | "bool" | "string" | "null"
               ; float = double = 64位（PHP float 语义）；32 位浮点用 c.f32
             | "callable" | "void"
+            | "object"          (* 裸对象指针 TphpObjHead *；无成员布局，见「object 与流敏感类型收窄」 *)
             | "array", "<", type, ">"
             | "map", "<", type, ",", type, ">"   (* K 限 int/string；哈希无序 *)
             | ident           (* 类名 / 接口名 *)
@@ -190,7 +191,8 @@ class Circle implements Shape { /* 必须实现全部方法，签名精确一致
 - 类可实现多个接口；实现校验：方法存在且签名精确匹配
 - 接口变量是 Go itab 风格胖指针（对象指针 + 方法表）；可为 null
 - 类 → 接口赋值/传参/返回自动包装；`array<接口>` 合法
-- 接口不可实例化、没有属性；不做运行时类型判断（无 instanceof）
+- 接口不可实例化、没有属性；接口值可参与 `instanceof`（查 id 集，见「类」一节），
+  亦可赋给 `object`（取胖指针的 `.obj`，见「object 与流敏感类型收窄」）
 
 ### 管道操作符（|>）
 
@@ -312,7 +314,73 @@ int $w = divide(1, 0) or { echo err; 0 }; // err = 错误消息（string，只�
     本语言一致
 - `instanceof`：类/子类/接口判定（元信息挂在 vtable 头部：祖先 id 链 + 接口 id 集）；
   静态类型足以判定时编译期折叠为常量；左侧须为对象类型；右侧不支持动态类名
-- 不支持：匿名类 / 魔术方法（`__construct` / `__destruct` 除外）
+- 字段删除：实例的引用类型字段可用 `unset($obj->prop)` 释放并置空（`array`/类 → `NULL`，
+  接口 → 零值胖指针）；
+  - 值类型字段（`int`/`float`/`bool`/`string`）不可 unset（编译错误）
+  - 不支持 `unset($arr[$i])`（数组元素）、`unset($m[$k])`（map 键）、
+    `unset($v)`（整变量）、`unset(C::$p)`（静态属性）
+- 不支持：魔术方法（`__construct` / `__destruct` 除外）
+
+### object 与流敏感类型收窄
+
+`object` 是**裸对象指针**（C 上即 `TphpObjHead *`），表示"任意类或接口实例"的擦除型。
+它**本身没有成员布局**——不能直接 `$o->prop` / `$o->method()`（编译报错
+「`object` 类型无属性/方法布局，请先用 `instanceof` 收窄到具体类再访问」）。
+可用位置：形参 / 返回 / 字段 / 局部变量 / `array<object>`。类实例赋给 `object` 为零成本
+上转；接口值赋给 `object` 取胖指针的 `.obj`（丢弃方法表）。`object` 可空，可 `== null` /
+`!= null`；`map` 的值槽是裸拷贝、不参与引用计数，故暂不建议用 `object` 作 map 值。
+
+要访问成员，必须先用 `instanceof` **收窄回具体类**：
+
+```php
+object $o = new Dog();
+if ($o instanceof Dog) {
+    $o->bark();          // 收窄生效：该分支内 $o 视作 Dog
+}
+$o->bark();              // 编译错误：收窄只在分支内有效
+```
+
+**收窄的生效形态**（纯编译期，无运行期判定 / 无单态化）：
+
+- `if` 正分支：`if ($x instanceof C) { ... }` 的 then 块内
+- 守卫子句：`if (!($x instanceof C)) { return; }`——当 then 分支必以
+  `return` / `throw` / `break` / `continue` 结束时，收窄作用于**该 if 之后**的同一作用域
+- `&&` 右侧：`$x instanceof C && $x->m()`——仅右侧求值期间生效
+- 三元 then：`$x instanceof C ? $x->m() : ...`——仅 then 表达式期间生效
+- 循环条件体：`while ($x instanceof C) { ... }`、`for (...; $x instanceof C; ...) { ... }`
+  （`do ... while` 不收窄——循环体先于条件执行）
+
+**语义**：收窄是**分支局部**的——进入分支写入"影子类型"，退出即失效；同一变量在不同
+分支可收窄为不同具体类，分支外仍是原静态类型。嵌套 `instanceof` 可逐步收窄到更具体的类。
+
+**边界**：收窄目标**只能是具体类**。`if ($o instanceof Tagged)`（`Tagged` 为接口）**不产生
+收窄**——`object` → 接口需要运行期 itab 查表，本语言不做（见 `doc/not-doing.md`）。
+
+**注意**：`!$x instanceof C` 是**类型错误**——`!` 的优先级高于 `instanceof`，会先算 `!$x`
+（bool），再作为 `instanceof` 的左操作数；守卫必须写 `!($x instanceof C)`。
+
+### 匿名类
+
+`new class (args)? (extends X)? implements A, B { members }` —— 就地实现的**具名接口实现**。
+
+- **强制 `implements` 至少一个具名接口**：`new class { ... }` 与仅 `new class extends X { ... }`
+  （无 `implements`）均**编译报错**。匿名类的类型因此总是可写的——就是它 `implements` 的那个接口
+- 实现方式：Parser 将 `new class implements I { ... }` **升格**为合成具名类
+  （内部名 `_anon_class_<n>`，全局唯一），并入文件声明列表；后续 Checker / Gen / codegen
+  与普通类**完全同路**，无特殊处理
+- 诊断中该类显示为「匿名类」，不泄漏内部合成名
+- **传参三条通道**：
+  - ① 构造参数：`new class($v) implements I { __construct(int $x) {...} }` ——
+    也是**捕获外层值的唯一方式**（若 `extends`，参数喂给父类构造器）
+  - ② 本地使用：变量静态类型即合成类类型，可直接 `$a->field` / `$a->method()`
+  - ③ 跨边界：以 `implements` 的**具名接口**作为形参 / 返回 / 字段类型
+- **无 `use` 捕获、无 `env`**（与闭包不同）：匿名类不携带环境指针，捕获外层值只能经构造参数存为属性
+- **前置事实**：本语言形参**必须写类型**（`parseParamList` 对每个形参无条件解析类型，
+  兜底报「期望类型」），故 `function demo($a) {}` 为语法错误——匿名类实例**无法被无类型形参接收**；
+  跨边界必须把形参写成接口名。且目前**没有**闭包式"可回填的擦除形参写头"，
+  故不能用 `object` / 结构类型接收（`object` 本身亦不支持，见 `doc/not-doing.md`）
+- 未实现所 `implements` 接口的方法 → 沿用既有接口校验错误（`类 匿名类 实现接口 I 缺少方法 m()`）；
+  实现了别的接口却传给目标接口形参 → 沿用既有类型不匹配错误（不新增特例）
 
 ### trait
 
@@ -351,6 +419,7 @@ trait 的方法/属性/常量在使用类处**单态化复制**（C 符号属使
 | `var_dump($x)` | 打印类型与值（调试用） |
 | `implode($sep, $parts)` | 拼接 array\<string\>（O(n)，字符串累加的正解工具） |
 | `array_keys($m)` | map 的键收集为 array\<K\>（遍历入口） |
+| `unset($obj->prop, ...)` | 释放并置空类实例的引用类型字段（`array`/类/接口）；值类型字段报编译错误；仅实例属性 |
 | `c_str($s)` | string → char*（借用，phpc） |
 | `php_str($p)` / `php_str_ref($p)` | char* → string（深拷贝 / 零拷贝借用） |
 | `cbuf($n)` | 分配 n 字节 C 缓冲（登记所有权，函数出口自动 free） |

@@ -689,6 +689,7 @@ final class Scanner
             'insteadof' => TokenKind::KwInsteadof,
             'callable' => TokenKind::KwCallable,
             'void' => TokenKind::KwVoid,
+            'object' => TokenKind::KwObject,
             default => null,
         };
     }

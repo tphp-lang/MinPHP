@@ -7,6 +7,8 @@ namespace Tphp\Gen;
 use Tphp\Ast\Expr;
 use Tphp\Ast\Stmt;
 use Tphp\Ast\expr\AssignExpr;
+use Tphp\Ast\expr\CallExpr;
+use Tphp\Ast\expr\IndexExpr;
 use Tphp\Ast\expr\PropFetch;
 use Tphp\Ast\expr\VarExpr;
 use Tphp\Ast\expr\NullLit;
@@ -38,7 +40,9 @@ trait GenStmtTrait
         $this->rcStmtBegin();
 
         if ($s instanceof ExprStmt) {
-            if ($s->expr instanceof AssignExpr) {
+            if ($s->expr instanceof CallExpr && $s->expr->name === 'unset') {
+                $this->genUnsetStmt($s->expr);
+            } elseif ($s->expr instanceof AssignExpr) {
                 $this->genAssignStmt($s->expr); // 顶层赋值：支持推断声明落 C
             } else {
                 $this->w($this->genExpr($s->expr) . ';');
@@ -217,6 +221,14 @@ trait GenStmtTrait
             && $this->table->isClass($s->init->type) && $type !== $s->init->type) {
             $init = '(' . $this->cType($type) . ')(' . $init . ')';
         }
+        // object 声明：类实例零成本指针转型；接口值取 .obj 解包
+        if ($s->init !== null && $this->table->isObject($type)) {
+            if ($this->needsIfaceUnwrap($s->init, $type)) {
+                $init = $this->genIfaceUnwrap($init);
+            } elseif ($this->table->isClass($s->init->type)) {
+                $init = '(' . $this->cType($type) . ')(' . $init . ')';
+            }
+        }
         // 接口声明：null → {0}；类实例 → 包 itab 胖指针
         if ($this->table->isInterface($type)) {
             if ($s->init === null || $s->init instanceof NullLit) {
@@ -262,6 +274,14 @@ trait GenStmtTrait
                 $text = '{0}';
             } elseif ($this->table->isClass($s->expr->type)) {
                 $text = $this->genIfaceWrap($s->expr, $text, $this->curRet);
+            }
+        }
+        // 返回 object 而表达式是接口：取 .obj 解包；类是零成本指针转型
+        if ($this->table->isObject($this->curRet)) {
+            if ($this->needsIfaceUnwrap($s->expr, $this->curRet)) {
+                $text = $this->genIfaceUnwrap($text);
+            } elseif ($this->table->isClass($s->expr->type)) {
+                $text = '(' . $this->cType($this->curRet) . ')(' . $text . ')';
             }
         }
         $heap = $this->isHeapType($s->expr->type);
@@ -420,6 +440,10 @@ trait GenStmtTrait
         if ($this->table->isClass($elem)) {
             $struct = Names::classStruct($this->table->className($elem));
             return $struct . '* ' . $val . ' = (' . $struct . '*)tphp_arr_get_obj(' . $arr . ', ' . $i . ');';
+        }
+        if ($this->table->isObject($elem)) {
+            return $this->elemCType($elem) . ' ' . $val . ' = (' . $this->elemCType($elem)
+                . ')tphp_arr_get_obj(' . $arr . ', ' . $i . ');';
         }
         // c.* 标量：按原始字节读取
         $ctype = $this->elemCType($elem);

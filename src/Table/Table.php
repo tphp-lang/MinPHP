@@ -74,6 +74,10 @@ final class Table
         $this->cnames[Type::I_ARRAY] = 'Array';
         $this->cnames[Type::I_NULL] = 'void*'; // null 类型 = C 空指针
 
+        // object：裸对象指针（种类 Object，C 名 TphpObjHead*；Gen 的 cType 会补 *）
+        $this->kinds[Type::I_OBJECT] = TypeKind::Object;
+        $this->cnames[Type::I_OBJECT] = 'TphpObjHead';
+
         // c.* 别名（doc/type.md）
         foreach (Type::C_ALIASES as $name => $cname) {
             $code = $this->nextCtype++;
@@ -85,6 +89,7 @@ final class Table
         // 内置极小函数集
         $this->fns['len'] = new FnSymbol('len', isBuiltin: true);
         $this->fns['var_dump'] = new FnSymbol('var_dump', isBuiltin: true);
+        $this->fns['unset'] = new FnSymbol('unset', isBuiltin: true); // 类实例属性删除（语言构造）
         $this->fns['implode'] = new FnSymbol('implode', isBuiltin: true); // 字符串累加的 O(n) 正解工具
         $this->fns['array_keys'] = new FnSymbol('array_keys', isBuiltin: true); // map 的键收集（遍历入口）
         // phpc 桥接：string ↔ char* + C 内存所有权
@@ -194,7 +199,7 @@ final class Table
         if ($this->isInterface($v)) {
             return 16; // TphpIface 胖指针 {obj, itab}
         }
-        if ($this->isArray($v) || $this->isMap($v) || $this->isClass($v)) {
+        if ($this->isArray($v) || $this->isMap($v) || $this->isClass($v) || $this->isObject($v)) {
             return 8; // 指针
         }
         if ($v === Type::I_DOUBLE) {
@@ -276,6 +281,12 @@ final class Table
         return $this->kindOf($code) === TypeKind::ClassType;
     }
 
+    /** object：裸对象指针（未收窄处无成员布局）。 */
+    public function isObject(int $code): bool
+    {
+        return $this->kindOf($code) === TypeKind::Object;
+    }
+
     public function isCallable(int $code): bool
     {
         return $code === Type::I_CALLABLE;
@@ -287,6 +298,7 @@ final class Table
         return $this->isArray($code)
             || $this->isClass($code)
             || $this->isInterface($code)
+            || $this->isObject($code)
             || $this->isCallable($code)
             || $code === Type::I_NULL;
     }
@@ -402,6 +414,9 @@ final class Table
         if ($this->isClass($elem)) {
             return 2;
         }
+        if ($this->isObject($elem)) {
+            return 2; // object 元素同为对象指针，参与引用计数
+        }
         if ($this->isInterface($elem)) {
             return 3;
         }
@@ -413,6 +428,13 @@ final class Table
     {
         if ($code === Type::NONE) {
             return '<unknown>';
+        }
+        if ($this->isClass($code)) {
+            foreach ($this->classes as $class) {
+                if ($class->code === $code && $class->displayName !== null) {
+                    return $class->displayName;
+                }
+            }
         }
         $found = array_search($code, $this->byName, true);
         if (is_string($found) && $found !== '' && !str_starts_with($found, 'array<')) {

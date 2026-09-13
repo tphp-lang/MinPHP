@@ -47,6 +47,9 @@ final class ClassSymbol
     /** trait 嵌套 use 展开防重入标记 */
     public bool $traitsExpanded = false;
 
+    /** 诊断显示名（null = 用 $name）；匿名类显示为「匿名类」，不泄漏合成名。 */
+    public ?string $displayName = null;
+
     /** @var list<array{name: string, value: ?\Tphp\Ast\Expr}> 枚举 case */
     public array $enumCases = [];
 

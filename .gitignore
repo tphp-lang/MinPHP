@@ -1,6 +1,7 @@
 # ai
 .zcode/
 .workbuddy/
+.trae/
 
 # 编译产物
 /tcc

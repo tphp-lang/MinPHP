@@ -17,7 +17,8 @@
 | 类类型 | tphp_class_X* | 编译期单态化为 C struct，变量为指针，可为 null |
 | 枚举类型 | tphp_class_X* | case 单例集（对象引用语义，见下文枚举一节） |
 | 接口类型 | TphpIface | Go itab 风格胖指针（对象指针 + 方法表），可为 null |
-| null | — | 仅可赋给 array / callable / 类类型（映射 NULL） |
+| object | TphpObjHead * | 裸对象指针（任意类/接口实例的擦除型）；无成员布局，须先 `instanceof` 收窄回具体类（见下文 object 一节） |
+| null | — | 仅可赋给 array / callable / 类类型 / 接口类型 / object（映射 NULL） |
 
 ## 不可自动推导
 
@@ -52,6 +53,21 @@ C 侧类型（位宽/ABI 由程序员负责）——首次赋值推断被编译�
 | c.f64 | double | 64位浮点的 C 侧别名（与 float 同型） |
 | c.ptr | void* | 指针类型 |
 | cstruct | 见 #struct | phpc 的 C 结构体值类型（doc/phpc.md） |
+
+## object（裸对象指针）
+
+`object` 是任意对象实例的**擦除型**：C 表示复用客户端结构体的公共头，即裸对象指针 `TphpObjHead *`。
+它既不携带方法集写头，也不含字段布局。
+
+- **类 → `object`**：零成本指针上转 `(TphpObjHead *)(p)`
+- **接口 → `object`**：读接口胖指针 `TphpIface{obj, itab}` 的 `.obj` 字段
+- **引用计数**：`object` 参与 RC，可作形参 / 返回 / 字段 / 局部 / `array<T>` / `map<K,V>` / `catch` 的类型
+- **禁止直接成员访问**：`$o->m()` / `$o->p` 编译报错，须先用 `instanceof` 收窄回**具体类**
+  （见 doc/grammar.md 的流敏感收窄一节）
+- **收窄边界**：只能收窄回具体类；`object` → 接口需运行期 itab 查表，**不做**
+
+`array<object>` 的元素槽为对象指针（8 字节），push / 读 / 写复用对象通路
+（`tphp_arr_push_obj` / `tphp_arr_get_obj` / `tphp_arr_set_obj`），数组释放时逐元素 `unref`。
 
 ## 字符串
 

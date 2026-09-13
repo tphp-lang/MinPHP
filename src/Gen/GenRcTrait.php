@@ -38,6 +38,7 @@ trait GenRcTrait
         return $this->table->isArray($code)
             || $this->table->isClass($code)
             || $this->table->isInterface($code)
+            || $this->table->isObject($code)
             || $this->table->isMap($code);
     }
 
@@ -253,7 +254,7 @@ trait GenRcTrait
     {
         if ($this->table->isArray($elem)) {
             $this->w('tphp_arr_ref(' . $c . ');');
-        } elseif ($this->table->isClass($elem) || $this->table->isInterface($elem)) {
+        } elseif ($this->table->isClass($elem) || $this->table->isInterface($elem) || $this->table->isObject($elem)) {
             $this->w('tphp_object_ref(' . $this->rcHeapPath($c, $elem) . ');');
         }
     }

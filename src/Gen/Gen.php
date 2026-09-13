@@ -124,9 +124,9 @@ final class Gen
             return 'void';
         }
         $name = $this->table->cnames[$code] ?? 'void';
-        // 引用类型（数组/类/map）在 C 中以指针表示
+        // 引用类型（数组/类/map/object）在 C 中以指针表示
         $kind = $this->table->kindOf($code);
-        if ($kind === TypeKind::ArrayOf || $kind === TypeKind::ClassType || $kind === TypeKind::MapType) {
+        if ($kind === TypeKind::ArrayOf || $kind === TypeKind::ClassType || $kind === TypeKind::MapType || $kind === TypeKind::Object) {
             return $name . '*';
         }
         return $name;
@@ -227,7 +227,7 @@ final class Gen
         if ($this->table->isString($code)) {
             return 'tphp_str_empty()';
         }
-        if ($this->table->isArray($code) || $this->table->isClass($code) || $this->table->isMap($code) || $code === Type::I_NULL) {
+        if ($this->table->isArray($code) || $this->table->isClass($code) || $this->table->isMap($code) || $this->table->isObject($code) || $code === Type::I_NULL) {
             return 'NULL';
         }
         if ($this->table->isCallable($code)) {
